@@ -553,8 +553,13 @@ def _escrever_aba_estilizada(
     # ── Detectar colunas de tipo numérico / % ────────────
     cols = list(df.columns)
     n_cols = len(cols)
-    wmape_idx = cols.index(col_wmape) if col_wmape and col_wmape in cols else None
-    metodo_idx= cols.index(col_metodo) if col_metodo and col_metodo in cols else None
+    wmape_idx  = cols.index(col_wmape)  if col_wmape  and col_wmape  in cols else None
+    metodo_idx = cols.index(col_metodo) if col_metodo and col_metodo in cols else None
+
+    # Colunas que devem ser tratadas como texto (SKU)
+    sku_idx_list = [i for i, c in enumerate(cols)
+                    if c.upper() in ('SKU', 'COD. MATERIAL', 'CODIGO', 'MATERIAL', 'ITEM')
+                    or 'sku' in c.lower()]
 
     # Escrever na aba (dados brutos para manter valores numéricos)
     df.to_excel(writer, sheet_name=nome_aba, index=False, startrow=2, header=False)
@@ -581,7 +586,14 @@ def _escrever_aba_estilizada(
             is_pct_col   = isinstance(val, str) and str(val).strip().endswith('%')
             is_num       = isinstance(val, (int, float)) and not pd.isna(val)
 
-            if is_wmape_col:
+            if ci in sku_idx_list:
+                # SKU sempre como texto
+                fmt_sku = _xl_fmt(wb, bg_color=_XL['white'] if bg_par else _XL['off_white'],
+                                  border=1, border_color='E2E8F0', font_size=9,
+                                  font_name='Calibri', valign='vcenter', num_format='@')
+                ws.write_string(ri+2, ci, str(int(val)) if isinstance(val, float) and val == int(val)
+                                else str(val) if val is not None else '—', fmt_sku)
+            elif is_wmape_col:
                 # Coloração condicional por faixa
                 raw = val
                 if isinstance(raw, str) and raw.endswith('%'):
