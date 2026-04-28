@@ -476,41 +476,209 @@ def wmape_ia_insample(model, serie: pd.Series):
 # EXPORTAÇÃO EXCEL
 # ══════════════════════════════════════════════════════════════
 
-def exportar_excel(df_bt, df_ia, df_top10):
+# ──────────────────────────────────────────────────────────
+# EXPORTAÇÃO ESTILIZADA — usada por todos os botões de download
+# ──────────────────────────────────────────────────────────
+
+# Paleta de cores padrão do dashboard
+_XL = {
+    'navy':      '0F2B4F',
+    'teal':      '0D9488',
+    'teal_lt':   '14B8A6',
+    'amber':     'F59E0B',
+    'white':     'FFFFFF',
+    'off_white': 'F8FAFC',
+    'slate':     '64748B',
+    'green':     '22C55E',
+    'red':       'EF4444',
+    'yellow':    'EAB308',
+    'light_green': 'C8E6C9',
+    'light_yellow':'FFF9C4',
+    'light_red':   'FFCDD2',
+    'light_teal':  'E0F2F1',
+    'light_amber': 'FEF9EC',
+}
+
+def _xl_fmt(wb, **kw):
+    """Cria formato xlsxwriter a partir de kwargs."""
+    return wb.add_format(kw)
+
+def _escrever_aba_estilizada(
+    writer, df: pd.DataFrame, nome_aba: str,
+    col_wmape=None,          # nome da coluna de WMAPE (para coloração condicional)
+    col_wmape_escala=1.0,    # 1.0 se decimal, 100.0 se já em %
+    col_metodo=None,         # coluna do melhor método (teal)
+    col_classe=None,         # coluna de classificação (badge)
+    freeze=True,
+    col_widths: dict = None, # {nome_col: largura} override
+):
+    if df is None or len(df) == 0:
+        return
+    wb  = writer.book
+
+    # ── Formatos base ─────────────────────────────────────
+    hdr = _xl_fmt(wb, bold=True, bg_color=_XL['navy'], font_color=_XL['white'],
+                  border=1, border_color='CCCCCC', align='center', valign='vcenter',
+                  font_size=10, font_name='Calibri')
+    row_par  = _xl_fmt(wb, bg_color=_XL['white'],     border=1, border_color='E2E8F0',
+                       font_size=9, font_name='Calibri', valign='vcenter')
+    row_impar= _xl_fmt(wb, bg_color=_XL['off_white'], border=1, border_color='E2E8F0',
+                       font_size=9, font_name='Calibri', valign='vcenter')
+    # WMAPE condicional
+    fmt_excelente = _xl_fmt(wb, bg_color=_XL['light_green'],  border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', bold=True, font_color='1B5E20')
+    fmt_bom       = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', bold=True, font_color='004D40')
+    fmt_regular   = _xl_fmt(wb, bg_color=_XL['light_yellow'], border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', bold=True, font_color='E65100')
+    fmt_critico   = _xl_fmt(wb, bg_color=_XL['light_red'],    border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', bold=True, font_color='B71C1C')
+    fmt_metodo    = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', bold=True, font_color=_XL['teal'])
+    fmt_num       = _xl_fmt(wb, bg_color=_XL['white'],        border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
+    fmt_num_impar = _xl_fmt(wb, bg_color=_XL['off_white'],    border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
+    fmt_pct       = _xl_fmt(wb, bg_color=_XL['white'],        border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', num_format='0.0%',     valign='vcenter')
+    fmt_pct_impar = _xl_fmt(wb, bg_color=_XL['off_white'],    border=1, border_color='E2E8F0',
+                            font_size=9, font_name='Calibri', num_format='0.0%',     valign='vcenter')
+    # Título da aba
+    titulo_fmt = _xl_fmt(wb, bold=True, bg_color=_XL['teal'], font_color=_XL['white'],
+                         font_size=11, font_name='Calibri', valign='vcenter', align='left')
+    # Legenda inferior
+    leg_hdr = _xl_fmt(wb, bold=True, bg_color=_XL['slate'], font_color=_XL['white'],
+                      font_size=8, font_name='Calibri')
+
+    # ── Detectar colunas de tipo numérico / % ────────────
+    cols = list(df.columns)
+    n_cols = len(cols)
+    wmape_idx = cols.index(col_wmape) if col_wmape and col_wmape in cols else None
+    metodo_idx= cols.index(col_metodo) if col_metodo and col_metodo in cols else None
+
+    # Escrever na aba (dados brutos para manter valores numéricos)
+    df.to_excel(writer, sheet_name=nome_aba, index=False, startrow=2, header=False)
+    ws = writer.sheets[nome_aba]
+
+    # ── Linha de título da aba (row 0) ───────────────────
+    ws.set_row(0, 22)
+    ws.merge_range(0, 0, 0, max(n_cols-1, 0), f'  {nome_aba.replace("_", " ").upper()}', titulo_fmt)
+
+    # ── Cabeçalhos (row 1) ───────────────────────────────
+    ws.set_row(1, 20)
+    for ci, col in enumerate(cols):
+        ws.write(1, ci, str(col), hdr)
+
+    # ── Dados (a partir de row 2) ────────────────────────
+    for ri, row in enumerate(df.itertuples(index=False)):
+        ws.set_row(ri + 2, 16)
+        bg_par = ri % 2 == 0
+        for ci, val in enumerate(row):
+            col_name = cols[ci]
+            # Determinar formato
+            is_wmape_col = (ci == wmape_idx)
+            is_metodo_col= (ci == metodo_idx)
+            is_pct_col   = isinstance(val, str) and str(val).strip().endswith('%')
+            is_num       = isinstance(val, (int, float)) and not pd.isna(val)
+
+            if is_wmape_col:
+                # Coloração condicional por faixa
+                raw = val
+                if isinstance(raw, str) and raw.endswith('%'):
+                    try: raw = float(raw.replace('%','').replace(',','.').strip()) / 100
+                    except: raw = np.nan
+                if pd.isna(raw):
+                    ws.write(ri+2, ci, '—', row_par if bg_par else row_impar)
+                else:
+                    v_pct = raw * col_wmape_escala if col_wmape_escala != 1.0 else raw
+                    if v_pct < 0.20:   fmt_w = fmt_excelente
+                    elif v_pct < 0.35: fmt_w = fmt_bom
+                    elif v_pct < 0.60: fmt_w = fmt_regular
+                    else:              fmt_w = fmt_critico
+                    ws.write(ri+2, ci, f'{v_pct*100:.1f}%', fmt_w)
+            elif is_metodo_col:
+                ws.write(ri+2, ci, str(val) if val is not None else '—', fmt_metodo)
+            elif is_num and ('wmape' in col_name.lower() or 'erro' in col_name.lower() or '%' in col_name):
+                fmt_use = fmt_pct if bg_par else fmt_pct_impar
+                ws.write(ri+2, ci, val, fmt_use)
+            elif is_num:
+                fmt_use = fmt_num if bg_par else fmt_num_impar
+                ws.write(ri+2, ci, val, fmt_use)
+            else:
+                fmt_use = row_par if bg_par else row_impar
+                ws.write(ri+2, ci, str(val) if val is not None and not (isinstance(val, float) and pd.isna(val)) else '—', fmt_use)
+
+    # ── Larguras das colunas ─────────────────────────────
+    default_w = 16
+    col_w_map = col_widths or {}
+    for ci, col in enumerate(cols):
+        w = col_w_map.get(col, default_w)
+        ws.set_column(ci, ci, w)
+
+    # ── Freeze pane ─────────────────────────────────────
+    if freeze:
+        ws.freeze_panes(2, 0)
+
+    # ── Legenda de WMAPE ─────────────────────────────────
+    leg_row = len(df) + 4
+    ws.write(leg_row, 0, 'Legenda WMAPE', leg_hdr)
+    for j, (lbl, bg, fc) in enumerate([
+        ('< 20%  — Excelente',    _XL['light_green'],  '1B5E20'),
+        ('20–35% — Bom ⭐',       _XL['light_teal'],   '004D40'),
+        ('35–60% — Regular',      _XL['light_yellow'], 'E65100'),
+        ('> 60%  — Crítico',      _XL['light_red'],    'B71C1C'),
+    ], 1):
+        ws.write(leg_row + j, 0, lbl, _xl_fmt(wb, bg_color=bg, font_color=fc,
+                                               font_size=8, font_name='Calibri', bold=True,
+                                               border=1, border_color='CCCCCC'))
+
+
+def exportar_excel_visual(abas: dict, filename_prefix: str = 'forecast') -> io.BytesIO:
+    """
+    abas: dict { nome_aba: { 'df': DataFrame, 'col_wmape': str|None,
+                              'col_metodo': str|None, 'col_widths': dict|None } }
+    """
     buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='xlsxwriter') as w:
-        wb = w.book
-        hdr = wb.add_format({'bold': True, 'bg_color': '#1f4e79', 'font_color': '#FFFFFF',
-                              'border': 1, 'align': 'center', 'valign': 'vcenter'})
-        verde  = wb.add_format({'bg_color': '#c8e6c9'})
-        amarelo= wb.add_format({'bg_color': '#fff9c4'})
-        vermelho= wb.add_format({'bg_color': '#ffcdd2'})
-
-        def write_sheet(df, nome):
-            if df is None or len(df) == 0:
-                return
-            df.to_excel(w, sheet_name=nome, index=False, startrow=1, header=False)
-            ws = w.sheets[nome]
-            for ci, col in enumerate(df.columns):
-                ws.write(0, ci, str(col), hdr)
-            ws.set_column(0, len(df.columns)-1, 18)
-
-        write_sheet(df_bt, 'Backtesting_Completo')
-        write_sheet(df_ia, 'Sugestoes_IA')
-        write_sheet(df_top10, 'Top10_Piores_WMAPE')
-
-        # Legenda
-        ls = wb.add_worksheet('Legenda')
-        ls.write('A1', 'Legenda de Cores', hdr)
-        for i, (txt, fmt) in enumerate([
-            ('WMAPE < 20% — Excelente', verde),
-            ('WMAPE 20-40% — Bom',      amarelo),
-            ('WMAPE > 40% — Revisar',   vermelho),
+    with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
+        for nome_aba, cfg in abas.items():
+            _escrever_aba_estilizada(
+                writer,
+                df=cfg.get('df'),
+                nome_aba=nome_aba,
+                col_wmape=cfg.get('col_wmape'),
+                col_wmape_escala=cfg.get('col_wmape_escala', 1.0),
+                col_metodo=cfg.get('col_metodo'),
+                col_widths=cfg.get('col_widths'),
+            )
+        # Aba de legenda geral
+        wb = writer.book
+        ls = wb.add_worksheet('Legenda_Geral')
+        ls.set_column(0, 0, 35)
+        hf = wb.add_format({'bold':True,'bg_color':_XL['navy'],'font_color':_XL['white'],
+                            'font_size':10,'font_name':'Calibri','border':1})
+        ls.write(0, 0, 'Legenda Geral do Arquivo', hf)
+        for i, (txt, bg, fc) in enumerate([
+            ('WMAPE < 20%  — Excelente (verde escuro)',    _XL['light_green'],  '1B5E20'),
+            ('WMAPE 20–35% — Bom ⭐ (teal)',              _XL['light_teal'],   '004D40'),
+            ('WMAPE 35–60% — Regular (amarelo)',           _XL['light_yellow'], 'E65100'),
+            ('WMAPE > 60%  — Crítico (vermelho)',          _XL['light_red'],    'B71C1C'),
+            ('Método Base  — Melhor método (teal)',        _XL['light_teal'],   _XL['teal']),
         ], 1):
-            ls.write(i, 0, txt, fmt)
-
+            ls.write(i, 0, txt, wb.add_format({'bg_color':bg,'font_color':fc,'font_size':9,
+                                               'font_name':'Calibri','bold':True,'border':1}))
     buf.seek(0)
     return buf
+
+
+# Manter compatibilidade com código legado
+def exportar_excel(df_bt, df_ia, df_top10):
+    abas = {
+        'Backtesting_Completo': {'df': df_bt,   'col_wmape': 'melhor_wmape', 'col_metodo': 'melhor_metodo'},
+        'Sugestoes_IA':         {'df': df_ia,   'col_wmape': 'wmape_melhor', 'col_metodo': 'melhor_metodo'},
+        'Top10_Piores_WMAPE':   {'df': df_top10,'col_wmape': 'wmape_pct',    'col_wmape_escala': 100.0,
+                                 'col_metodo': 'melhor_metodo'},
+    }
+    return exportar_excel_visual(abas)
 
 # ══════════════════════════════════════════════════════════════
 # GERAÇÃO DE TEXTO DE SUGESTÃO
@@ -1011,13 +1179,40 @@ def main():
             st.dataframe(df_per_show, use_container_width=True, hide_index=True)
 
             # Mini-resumo do período
-            r_col1, r_col2, r_col3 = st.columns(3)
+            r_col1, r_col2, r_col3, r_col4 = st.columns(4)
             total_real = df_per['realizado'].sum()
             total_v5   = df_per['prev_v5'].sum()
             r_col1.metric("Total Realizado", f"{total_real:,.0f}")
             r_col2.metric("Total Prev. V5",  f"{total_v5:,.0f}")
             r_col3.metric("Diferença",        f"{total_v5 - total_real:,.0f}",
                           delta=f"{(total_v5-total_real)/max(total_real,1)*100:.1f}%")
+
+            # Export com visual do dashboard
+            df_mensal_exp = df_per.rename(columns={
+                'sku':'SKU','realizado':'Realizado',
+                'prev_original':'Prev. Original (arquivo)',
+                'prev_v5':'Melhor Prev. V5',
+                'wmape_v5':'WMAPE V5 (backtesting)',
+                'wmape_original':'WMAPE Original (período)',
+                'erro_prev_orig':'Erro % Prev. Original',
+                'erro_prev_v5':'Erro % Prev. V5',
+            }).copy()
+            buf_mensal = exportar_excel_visual({
+                f'Mensal_{per_sel.replace("/","_")}': {
+                    'df': df_mensal_exp,
+                    'col_wmape': 'WMAPE V5 (backtesting)',
+                    'col_widths': {'SKU':12,'Realizado':14,'Prev. Original (arquivo)':22,
+                                   'Melhor Prev. V5':18,'WMAPE V5 (backtesting)':22,
+                                   'WMAPE Original (período)':24,'Erro % Prev. Original':22,
+                                   'Erro % Prev. V5':18},
+                }
+            })
+            r_col4.download_button(
+                "📥 Exportar Excel",
+                data=buf_mensal,
+                file_name=f"mensal_{per_sel.replace('/','_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
         else:
             st.info("Rode o pipeline completo para visualizar a tabela mensal.")
 
@@ -1054,15 +1249,34 @@ def main():
         df_display['melhor_wmape'] = (df_display['melhor_wmape'] * 100).round(1).astype(str) + '%'
         df_display['cv'] = df_display['cv'].round(3)
 
-        st.dataframe(
-            df_display.rename(columns={
-                'sku': 'SKU', 'melhor_metodo': 'Melhor Método',
-                'melhor_wmape': 'WMAPE', 'classificacao': 'Classificação',
-                'tendencia': 'Tendência', 'cv': 'CV', 'n_periodos': 'N Períodos'
-            }),
-            use_container_width=True, hide_index=True
-        )
+        df_sel_show = df_display.rename(columns={
+            'sku': 'SKU', 'melhor_metodo': 'Melhor Método',
+            'melhor_wmape': 'WMAPE', 'classificacao': 'Classificação',
+            'tendencia': 'Tendência', 'cv': 'CV', 'n_periodos': 'N Períodos'
+        })
+        st.dataframe(df_sel_show, use_container_width=True, hide_index=True)
         st.caption(f"{len(df_f)} SKUs exibidos")
+        # Export estilizado — valores numéricos limpos para o Excel
+        df_sel_exp = df_f.rename(columns={
+            'sku': 'SKU', 'melhor_metodo': 'Melhor Método',
+            'melhor_wmape': 'WMAPE', 'classificacao': 'Classificação',
+            'tendencia': 'Tendência', 'cv': 'CV', 'n_periodos': 'N Períodos'
+        }).copy()
+        buf_sel = exportar_excel_visual({
+            'Melhor_Metodo_por_SKU': {
+                'df': df_sel_exp,
+                'col_wmape': 'WMAPE',
+                'col_metodo': 'Melhor Método',
+                'col_widths': {'SKU':14,'Melhor Método':18,'WMAPE':14,
+                               'Classificação':16,'Tendência':20,'CV':10,'N Períodos':14},
+            }
+        })
+        st.download_button(
+            "📥 Exportar Melhor Método por SKU (.xlsx)",
+            data=buf_sel,
+            file_name=f"melhor_metodo_sku_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
         col_l, col_r = st.columns(2)
 
@@ -1397,21 +1611,44 @@ def main():
             lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—"
         )
 
-        st.dataframe(
-            df_ia_show.rename(columns={
-                'sku':                  'SKU',
-                'classificacao':        'Classificação',
-                'tendencia':            'Tendência',
-                'media_historica':      'Média Hist.',
-                'cv':                   'CV',
-                'previsao_estatistica': 'Prev. Estatística',
-                'previsao_ia':          'Prev. IA',
-                'previsao_combinada':   'Prev. Combinada',
-                'melhor_metodo':        'Melhor Método',
-                'wmape_melhor':         'WMAPE',
-                'wmape_ia_insample':    'WMAPE IA (in-sample)',
-            }),
-            use_container_width=True, hide_index=True
+        df_ia_renamed = df_ia_show.rename(columns={
+            'sku':                  'SKU',
+            'classificacao':        'Classificação',
+            'tendencia':            'Tendência',
+            'media_historica':      'Média Hist.',
+            'cv':                   'CV',
+            'previsao_estatistica': 'Prev. Estatística',
+            'previsao_ia':          'Prev. IA',
+            'previsao_combinada':   'Prev. Combinada',
+            'melhor_metodo':        'Melhor Método',
+            'wmape_melhor':         'WMAPE',
+            'wmape_ia_insample':    'WMAPE IA (in-sample)',
+        })
+        st.dataframe(df_ia_renamed, use_container_width=True, hide_index=True)
+        # Export estilizado com valores numéricos reais
+        df_ia_exp = df_ia.rename(columns={
+            'sku':'SKU','classificacao':'Classificação','tendencia':'Tendência',
+            'media_historica':'Média Hist.','cv':'CV',
+            'previsao_estatistica':'Prev. Estatística','previsao_ia':'Prev. IA',
+            'previsao_combinada':'Prev. Combinada','melhor_metodo':'Melhor Método',
+            'wmape_melhor':'WMAPE','wmape_ia_insample':'WMAPE IA (in-sample)',
+        }).copy()
+        buf_ia = exportar_excel_visual({
+            'Resumo_IA_Todos_SKUs': {
+                'df': df_ia_exp,
+                'col_wmape': 'WMAPE',
+                'col_metodo': 'Melhor Método',
+                'col_widths': {'SKU':14,'Classificação':16,'Tendência':18,'Média Hist.':14,
+                               'CV':10,'Prev. Estatística':18,'Prev. IA':14,
+                               'Prev. Combinada':16,'Melhor Método':18,
+                               'WMAPE':14,'WMAPE IA (in-sample)':22},
+            }
+        })
+        st.download_button(
+            "📥 Exportar Resumo IA — Todos os SKUs (.xlsx)",
+            data=buf_ia,
+            file_name=f"resumo_ia_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
         # ── TABELA HORIZONTE 3 MESES ─────────────────────────
@@ -1502,19 +1739,33 @@ def main():
 
             st.dataframe(df_horizonte_show, use_container_width=True, hide_index=True)
 
-            # Totais
-            st.markdown("**Totais por mês:**")
+            # Totais — respeitam o filtro de SKU aplicado
+            n_skus_filtro = len(df_horizonte_show)
+            n_skus_total  = len(df_horizonte)
+            filtro_ativo  = skus_busca.strip() != ""
+            label_filtro  = f" ({n_skus_filtro} SKUs filtrados)" if filtro_ativo else f" ({n_skus_total} SKUs)"
+            st.markdown(f"**Totais por mês{label_filtro}:**")
             tot_cols = st.columns(4)
             for i, (_, _, lbl_h) in enumerate(proximos):
                 col_name = f'Prev {lbl_h}'
-                if col_name in df_horizonte.columns:
-                    tot_cols[i].metric(lbl_h, f"{df_horizonte[col_name].sum():,.0f}")
+                if col_name in df_horizonte_show.columns:
+                    tot_cols[i].metric(lbl_h, f"{df_horizonte_show[col_name].sum():,.0f}")
 
-            # Download
-            csv_h = df_horizonte.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 Baixar previsão 3 meses (.csv)", csv_h,
-                               file_name=f"previsao_3meses_{ultimo_mes:02d}_{ultimo_ano}.csv",
-                               mime="text/csv")
+            # Download estilizado
+            buf_hz = exportar_excel_visual({
+                'Horizonte_4_Meses': {
+                    'df': df_horizonte_show,
+                    'col_metodo': 'Método Base',
+                    'col_widths': {'SKU':14,'Método Base':18,
+                                   **{f'Prev {p[2]}':16 for p in proximos}},
+                }
+            })
+            st.download_button(
+                "📥 Exportar Horizonte 4 Meses (.xlsx)",
+                data=buf_hz,
+                file_name=f"horizonte_4meses_{ultimo_mes:02d}_{ultimo_ano}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
         else:
             st.info("Rode o pipeline completo para visualizar as previsões de horizonte.")
 
