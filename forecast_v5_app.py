@@ -1555,27 +1555,51 @@ def main():
 
                 x_plot = list(range(offset, len(serie_ia_full)))
 
+                # Construir labels de mês para o eixo X
+                if col_periodo and col_ano:
+                    _df_sku_ia = df_base[df_base[col_sku] == sku_ia][[col_ano, col_periodo]].reset_index(drop=True)
+                    _meses_ord_ia = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
+                                     'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
+                    _df_sku_ia['_mn'] = _df_sku_ia[col_periodo].astype(str).str.lower().str[:3].map(_meses_ord_ia).fillna(0)
+                    _df_sku_ia['_an'] = pd.to_numeric(_df_sku_ia[col_ano], errors='coerce').fillna(0)
+                    _df_sku_ia = _df_sku_ia.sort_values(['_an','_mn']).reset_index(drop=True)
+                    x_labels_ia_all = [
+                        f"{str(r[col_periodo]).lower()[:3]}/{str(int(r[col_ano]))[-2:]}"
+                        for _, r in _df_sku_ia.iterrows()
+                    ]
+                    # Adicionar label "Próx." para o ponto de previsão
+                    _prox_m = (int(_df_sku_ia['_mn'].iloc[-1]) % 12) + 1
+                    _prox_a = int(_df_sku_ia['_an'].iloc[-1]) + (1 if _df_sku_ia['_mn'].iloc[-1] == 12 else 0)
+                    _mn2 = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',
+                            7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
+                    x_labels_ia_prox = [f"{_mn2[_prox_m]}/{str(_prox_a)[-2:]}"]
+                else:
+                    x_labels_ia_all  = [str(i) for i in range(len(serie_ia_full))]
+                    x_labels_ia_prox = ["Próx."]
+
+                x_labels_ia_plot = [x_labels_ia_all[i] for i in x_plot] if x_plot else []
+
                 fig_ia = go.Figure()
                 fig_ia.add_trace(go.Scatter(
-                    x=list(range(len(serie_ia_full))),
+                    x=x_labels_ia_all,
                     y=serie_ia_full.values,
                     mode='lines+markers', name='Histórico Real',
                     line=dict(color='#2c3e50', width=2), marker=dict(size=4)
                 ))
                 fig_ia.add_trace(go.Scatter(
-                    x=x_plot, y=y_pred_ia, mode='lines',
+                    x=x_labels_ia_plot, y=y_pred_ia, mode='lines',
                     name=f'IA (WMAPE in-sample={wmape_v*100:.1f}%)',
                     line=dict(color='#e67e22', width=2, dash='dot')
                 ))
                 fig_ia.add_trace(go.Scatter(
-                    x=x_plot, y=preds_stat_is, mode='lines',
+                    x=x_labels_ia_plot, y=preds_stat_is, mode='lines',
                     name=f'Método {row_ia["melhor_metodo"]}',
                     line=dict(color='#3498db', width=1.5, dash='dashdot')
                 ))
 
                 # Próximo período
                 fig_ia.add_trace(go.Scatter(
-                    x=[len(serie_ia_full)], y=[row_ia['previsao_combinada']],
+                    x=x_labels_ia_prox, y=[row_ia['previsao_combinada']],
                     mode='markers', name='Prev. Combinada (próx.)',
                     marker=dict(size=16, symbol='star', color='#e74c3c',
                                 line=dict(width=1.5, color='white'))
@@ -1665,8 +1689,8 @@ def main():
 
         # ── TABELA HORIZONTE 3 MESES ─────────────────────────
         st.divider()
-        st.markdown("### 📅 Previsão Horizonte 4 Meses — Todos os SKUs")
-        st.markdown("Previsão para os **próximos 4 meses** a partir do último período disponível na base, "
+        st.markdown("### 📅 Previsão Horizonte 3 Meses — Todos os SKUs")
+        st.markdown("Previsão para os **próximos 3 meses** (M+1, M+2, M+3) a partir do último período fechado na base, "
                     "usando o modelo combinado IA + melhor método estatístico.")
 
         if df_ia is not None and col_periodo and col_ano:
@@ -1685,7 +1709,7 @@ def main():
 
             # Calcular os 3 próximos meses
             proximos = []
-            for h_step in range(1, 5):
+            for h_step in range(1, 4):
                 m = (ultimo_mes - 1 + h_step) % 12 + 1
                 a = ultimo_ano + ((ultimo_mes - 1 + h_step) // 12)
                 proximos.append((a, meses_nome[m], f"{meses_nome[m]}/{str(a)[-2:]}"))
@@ -1717,12 +1741,12 @@ def main():
 
                 # Previsões h=1,2,3
                 try:
-                    preds_stat_h = fn_h(serie_h, h=4)
+                    preds_stat_h = fn_h(serie_h, h=3)
                 except:
-                    preds_stat_h = [float(serie_h.mean())] * 4
+                    preds_stat_h = [float(serie_h.mean())] * 3
 
                 # Rolling forecast IA para todos os passos de uma vez
-                preds_ia_h = prever_ia_multistep(model_h, serie_h, h=4)
+                preds_ia_h = prever_ia_multistep(model_h, serie_h, h=3)
 
                 for step, (ano_h, mes_h, lbl_h) in enumerate(proximos):
                     pred_stat_step = preds_stat_h[step] if step < len(preds_stat_h) else preds_stat_h[-1]
@@ -1757,7 +1781,7 @@ def main():
             filtro_ativo  = skus_busca.strip() != ""
             label_filtro  = f" ({n_skus_filtro} SKUs filtrados)" if filtro_ativo else f" ({n_skus_total} SKUs)"
             st.markdown(f"**Totais por mês{label_filtro}:**")
-            tot_cols = st.columns(4)
+            tot_cols = st.columns(3)
             for i, (_, _, lbl_h) in enumerate(proximos):
                 col_name = f'Prev {lbl_h}'
                 if col_name in df_horizonte_show.columns:
@@ -1765,7 +1789,7 @@ def main():
 
             # Download estilizado
             buf_hz = exportar_excel_visual({
-                'Horizonte_4_Meses': {
+                'Horizonte_3_Meses': {
                     'df': df_horizonte_show,
                     'col_metodo': 'Método Base',
                     'col_widths': {'SKU':14,'Método Base':18,
@@ -1773,9 +1797,9 @@ def main():
                 }
             })
             st.download_button(
-                "📥 Exportar Horizonte 4 Meses (.xlsx)",
+                "📥 Exportar Horizonte 3 Meses (.xlsx)",
                 data=buf_hz,
-                file_name=f"horizonte_4meses_{ultimo_mes:02d}_{ultimo_ano}.xlsx",
+                file_name=f"horizonte_3meses_{ultimo_mes:02d}_{ultimo_ano}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
@@ -1791,13 +1815,66 @@ def main():
             st.info("👆 Clique em **🚀 Rodar Pipeline Completo** na barra lateral para iniciar.")
             st.stop()
 
-        df_top10 = (df_ia.sort_values('wmape_melhor', ascending=False)
-                    .head(10).reset_index(drop=True).copy())
-        df_top10['wmape_pct'] = (df_top10['wmape_melhor'] * 100).round(1)
+        # ── Filtro de período histórico ──────────────────────────
+        _meses_ord_t5 = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
+                         'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
+        _mn_t5 = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',
+                  7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
+
+        f_periodo_label = st.radio(
+            "📅 Janela histórica para cálculo do WMAPE",
+            options=["3 Meses","6 Meses","12 Meses"],
+            index=2, horizontal=True, key='top10_periodo'
+        )
+        f_n_meses = int(f_periodo_label.split()[0])
+
+        # Recalcular WMAPE por janela — usando base histórica filtrada
+        if col_periodo and col_ano:
+            # Identificar os N últimos meses disponíveis na base
+            _df_per_t5 = df_base[[col_ano, col_periodo]].copy()
+            _df_per_t5['_mn'] = _df_per_t5[col_periodo].astype(str).str.lower().str[:3].map(_meses_ord_t5).fillna(0).astype(int)
+            _df_per_t5['_an'] = pd.to_numeric(_df_per_t5[col_ano], errors='coerce').fillna(0).astype(int)
+            _periodos_sorted = (_df_per_t5[['_an','_mn']].drop_duplicates()
+                                .sort_values(['_an','_mn'])
+                                .tail(f_n_meses))
+            _periodo_keys = set(zip(_periodos_sorted['_an'], _periodos_sorted['_mn']))
+
+            def _filtrar_serie(sku):
+                _df_sku = df_base[df_base[col_sku] == sku].copy()
+                _df_sku['_mn'] = _df_sku[col_periodo].astype(str).str.lower().str[:3].map(_meses_ord_t5).fillna(0).astype(int)
+                _df_sku['_an'] = pd.to_numeric(_df_sku[col_ano], errors='coerce').fillna(0).astype(int)
+                _df_sku = _df_sku[_df_sku.apply(lambda r: (r['_an'], r['_mn']) in _periodo_keys, axis=1)]
+                return _df_sku.sort_values(['_an','_mn'])[col_demanda].reset_index(drop=True).astype(float)
+
+            # Recalcular WMAPE backtesting para janela filtrada
+            _wmape_filtrado = {}
+            for _sku in df_ia['sku'].unique():
+                _serie_f = _filtrar_serie(_sku)
+                if len(_serie_f) >= 4:
+                    _row_bt = df_bt[df_bt['sku'] == _sku] if df_bt is not None else pd.DataFrame()
+                    _met = _row_bt.iloc[0]['melhor_metodo'] if len(_row_bt) > 0 else 'MA-3'
+                    _fn  = METODOS[_met]
+                    _w, _, _ = backtest_sku(_serie_f, _fn, n_test=min(3, len(_serie_f)//2))
+                    _wmape_filtrado[_sku] = _w if pd.notna(_w) else np.nan
+                else:
+                    _wmape_filtrado[_sku] = np.nan
+
+            df_ia_t5 = df_ia.copy()
+            df_ia_t5['wmape_janela'] = df_ia_t5['sku'].map(_wmape_filtrado)
+            df_top10 = (df_ia_t5.sort_values('wmape_janela', ascending=False, na_position='last')
+                        .head(10).reset_index(drop=True).copy())
+            df_top10['wmape_pct'] = (df_top10['wmape_janela'].fillna(df_top10['wmape_melhor']) * 100).round(1)
+        else:
+            df_top10 = (df_ia.sort_values('wmape_melhor', ascending=False)
+                        .head(10).reset_index(drop=True).copy())
+            df_top10['wmape_pct'] = (df_top10['wmape_melhor'] * 100).round(1)
+
+        st.caption(f"Top 10 piores WMAPE calculado sobre os últimos **{f_n_meses} meses** do histórico.")
+
         # Converter SKU para string — garante eixo categórico no Plotly
         df_top10['sku_str'] = 'SKU ' + df_top10['sku'].astype(str)
         df_top10['sugestao'] = df_top10.apply(
-            lambda r: gerar_sugestao(r.to_dict(), r['wmape_melhor']), axis=1
+            lambda r: gerar_sugestao(r.to_dict(), r.get('wmape_janela', r['wmape_melhor'])), axis=1
         )
 
         # Gráfico de barras horizontal
@@ -1838,11 +1915,24 @@ def main():
                 c3.metric("Prev. Combinada", f"{row.previsao_combinada:.1f}")
                 c4.metric("Melhor Método",   row.melhor_metodo)
 
-                # Mini gráfico
-                s_mini = df_base[df_base[col_sku] == row.sku][col_demanda].reset_index(drop=True).astype(float)
+                # Mini gráfico com eixo X em meses
+                _df_mini = df_base[df_base[col_sku] == row.sku].copy()
+                if col_periodo and col_ano:
+                    _mord = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
+                             'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
+                    _df_mini['_mn'] = _df_mini[col_periodo].astype(str).str.lower().str[:3].map(_mord).fillna(0)
+                    _df_mini['_an'] = pd.to_numeric(_df_mini[col_ano], errors='coerce').fillna(0)
+                    _df_mini = _df_mini.sort_values(['_an','_mn'])
+                    x_mini = [f"{str(r[col_periodo]).lower()[:3]}/{str(int(r[col_ano]))[-2:]}"
+                               for _, r in _df_mini.iterrows()]
+                    s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
+                else:
+                    s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
+                    x_mini = list(range(len(s_mini)))
+
                 fig_mini = go.Figure()
                 fig_mini.add_trace(go.Scatter(
-                    y=s_mini.values, mode='lines+markers',
+                    x=x_mini, y=s_mini.values, mode='lines+markers',
                     line=dict(color=wmape_color, width=2), marker=dict(size=5)
                 ))
                 fig_mini.add_hline(y=s_mini.mean(), line_dash='dash',
@@ -1851,7 +1941,8 @@ def main():
                     height=180, template='plotly_white',
                     showlegend=False,
                     margin=dict(l=20, r=20, t=20, b=20),
-                    xaxis_title='Período', yaxis_title='Demanda'
+                    xaxis_title='', yaxis_title='Demanda',
+                    xaxis=dict(tickangle=-45, tickfont=dict(size=9))
                 )
                 st.plotly_chart(fig_mini, use_container_width=True)
 
