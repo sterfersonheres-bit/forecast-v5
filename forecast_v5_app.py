@@ -1856,27 +1856,29 @@ def main():
                 return _df_sku.sort_values(['_an','_mn'])[col_demanda].reset_index(drop=True).astype(float)
 
             # Recalcular WMAPE backtesting para janela filtrada
-            # SKUs com menos de 3 ocorrências no período são excluídos do Top 10
-            _MIN_OCORRENCIAS = 3
+            # Regra: SKU precisa ter pelo menos 3 REGISTROS no período (presença na base),
+            # independentemente de ter demanda zero. SKUs ausentes do período são excluídos.
+            _MIN_REGISTROS = 3
             _wmape_filtrado = {}
-            _n_ocorrencias  = {}
+            _n_registros    = {}
             for _sku in df_ia['sku'].unique():
                 _serie_f = _filtrar_serie(_sku)
-                _n_oc = int((_serie_f > 0).sum())   # contagem de períodos com demanda > 0
-                _n_ocorrencias[_sku] = _n_oc
-                if len(_serie_f) >= _MIN_OCORRENCIAS and _n_oc >= _MIN_OCORRENCIAS:
+                _n_reg = len(_serie_f)           # quantos meses o SKU aparece na janela
+                _n_registros[_sku] = _n_reg
+                if _n_reg >= _MIN_REGISTROS:
                     _row_bt = df_bt[df_bt['sku'] == _sku] if df_bt is not None else pd.DataFrame()
                     _met = _row_bt.iloc[0]['melhor_metodo'] if len(_row_bt) > 0 else 'MA-3'
                     _fn  = METODOS[_met]
-                    _n_test = min(3, max(1, len(_serie_f) // 2))
+                    # n_test: mínimo 1, máximo 2 para janelas curtas (3-6 meses)
+                    _n_test = min(2, max(1, _n_reg - 2))
                     _w, _, _ = backtest_sku(_serie_f, _fn, n_test=_n_test)
                     _wmape_filtrado[_sku] = _w if pd.notna(_w) else np.nan
                 else:
-                    _wmape_filtrado[_sku] = np.nan   # NaN = excluído do ranking
+                    _wmape_filtrado[_sku] = np.nan  # NaN = excluído (< 3 registros no período)
 
             df_ia_t5 = df_ia.copy()
             df_ia_t5['wmape_janela']   = df_ia_t5['sku'].map(_wmape_filtrado)
-            df_ia_t5['n_ocorrencias']  = df_ia_t5['sku'].map(_n_ocorrencias)
+            df_ia_t5['n_registros']    = df_ia_t5['sku'].map(_n_registros)
             # Remover SKUs sem ocorrências suficientes antes de rankear
             df_ia_t5_validos = df_ia_t5.dropna(subset=['wmape_janela'])
             df_top10 = (df_ia_t5_validos
@@ -1895,7 +1897,7 @@ def main():
         _n_validos = int((df_ia_t5['wmape_janela'].notna()).sum()) if 'wmape_janela' in df_ia_t5.columns else len(df_ia)
         st.caption(
             f"Top 10 piores WMAPE calculado sobre os últimos **{f_n_meses} meses** do histórico. "
-            f"SKUs com menos de {_MIN_OCORRENCIAS} ocorrências no período foram excluídos. "
+            f"SKUs com menos de {_MIN_REGISTROS} registros na janela selecionada foram excluídos. "
             f"({_n_validos} SKUs elegíveis)"
         )
 
