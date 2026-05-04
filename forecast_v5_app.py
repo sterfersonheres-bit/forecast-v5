@@ -434,7 +434,7 @@ def prever_ia(model, serie: pd.Series) -> float | None:
     except:
         return None
 
-def prever_ia_multistep(model, serie: pd.Series, h: int = 4):
+def prever_ia_multistep(model, serie: pd.Series, h: int = 3):
     """Rolling forecast com IA para h passos.
     Cada previsão alimenta o passo seguinte (sem data leakage futuro)."""
     if model is None:
@@ -1699,7 +1699,13 @@ def main():
             meses_nome = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',
                           7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
 
-            # Descobrir último período da base
+            # Usar data REAL do sistema para M+1, M+2, M+3 (automático)
+            # O mês vigente (hoje) é o mês base — as previsões são os 3 seguintes
+            _hoje = datetime.date.today()
+            mes_atual_real  = _hoje.month    # mês de hoje (ex: maio = 5)
+            ano_atual_real  = _hoje.year
+
+            # Descobrir último período fechado na base (para informação)
             df_ult = df_base[[col_ano, col_periodo]].copy()
             df_ult['_mes_num'] = df_ult[col_periodo].astype(str).str.lower().str[:3].map(meses_ord2).fillna(0).astype(int)
             df_ult['_ano_int'] = pd.to_numeric(df_ult[col_ano], errors='coerce').fillna(0).astype(int)
@@ -1707,15 +1713,18 @@ def main():
             ultimo_ano = int(df_ult['_ano_int'].max())
             ultimo_mes = int(df_ult[df_ult['_ano_int'] == ultimo_ano]['_mes_num'].max())
 
-            # Calcular os 3 próximos meses
+            # M+1, M+2, M+3 em relação ao mês vigente real
             proximos = []
             for h_step in range(1, 4):
-                m = (ultimo_mes - 1 + h_step) % 12 + 1
-                a = ultimo_ano + ((ultimo_mes - 1 + h_step) // 12)
+                m = (mes_atual_real - 1 + h_step) % 12 + 1
+                a = ano_atual_real + ((mes_atual_real - 1 + h_step) // 12)
                 proximos.append((a, meses_nome[m], f"{meses_nome[m]}/{str(a)[-2:]}"))
 
-            st.info(f"📌 Último período na base: **{meses_nome[ultimo_mes]}/{ultimo_ano}** → "
-                    f"Previsões para: **{' · '.join(p[2] for p in proximos)}**")
+            st.info(
+                f"📌 Mês vigente: **{meses_nome[mes_atual_real]}/{ano_atual_real}** "
+                f"| Último período fechado na base: **{meses_nome[ultimo_mes]}/{ultimo_ano}** → "
+                f"Previsões M+1/M+2/M+3: **{' · '.join(p[2] for p in proximos)}**"
+            )
 
             # Calcular previsões para cada SKU × 3 horizontes
             rows_h = []
@@ -1799,7 +1808,7 @@ def main():
             st.download_button(
                 "📥 Exportar Horizonte 3 Meses (.xlsx)",
                 data=buf_hz,
-                file_name=f"horizonte_3meses_{ultimo_mes:02d}_{ultimo_ano}.xlsx",
+                file_name=f"horizonte_3meses_{meses_nome[mes_atual_real]}_{ano_atual_real}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         else:
@@ -1847,37 +1856,60 @@ def main():
                 return _df_sku.sort_values(['_an','_mn'])[col_demanda].reset_index(drop=True).astype(float)
 
             # Recalcular WMAPE backtesting para janela filtrada
+            # SKUs com menos de 3 ocorrências no período são excluídos do Top 10
+            _MIN_OCORRENCIAS = 3
             _wmape_filtrado = {}
+            _n_ocorrencias  = {}
             for _sku in df_ia['sku'].unique():
                 _serie_f = _filtrar_serie(_sku)
-                if len(_serie_f) >= 4:
+                _n_oc = int((_serie_f > 0).sum())   # contagem de períodos com demanda > 0
+                _n_ocorrencias[_sku] = _n_oc
+                if len(_serie_f) >= _MIN_OCORRENCIAS and _n_oc >= _MIN_OCORRENCIAS:
                     _row_bt = df_bt[df_bt['sku'] == _sku] if df_bt is not None else pd.DataFrame()
                     _met = _row_bt.iloc[0]['melhor_metodo'] if len(_row_bt) > 0 else 'MA-3'
                     _fn  = METODOS[_met]
-                    _w, _, _ = backtest_sku(_serie_f, _fn, n_test=min(3, len(_serie_f)//2))
+                    _n_test = min(3, max(1, len(_serie_f) // 2))
+                    _w, _, _ = backtest_sku(_serie_f, _fn, n_test=_n_test)
                     _wmape_filtrado[_sku] = _w if pd.notna(_w) else np.nan
                 else:
-                    _wmape_filtrado[_sku] = np.nan
+                    _wmape_filtrado[_sku] = np.nan   # NaN = excluído do ranking
 
             df_ia_t5 = df_ia.copy()
-            df_ia_t5['wmape_janela'] = df_ia_t5['sku'].map(_wmape_filtrado)
-            df_top10 = (df_ia_t5.sort_values('wmape_janela', ascending=False, na_position='last')
+            df_ia_t5['wmape_janela']   = df_ia_t5['sku'].map(_wmape_filtrado)
+            df_ia_t5['n_ocorrencias']  = df_ia_t5['sku'].map(_n_ocorrencias)
+            # Remover SKUs sem ocorrências suficientes antes de rankear
+            df_ia_t5_validos = df_ia_t5.dropna(subset=['wmape_janela'])
+            df_top10 = (df_ia_t5_validos
+                        .sort_values('wmape_janela', ascending=False)
                         .head(10).reset_index(drop=True).copy())
-            df_top10['wmape_pct'] = (df_top10['wmape_janela'].fillna(df_top10['wmape_melhor']) * 100).round(1)
+            df_top10['wmape_pct'] = (df_top10['wmape_janela'] * 100).round(1)
         else:
-            df_top10 = (df_ia.sort_values('wmape_melhor', ascending=False)
+            _MIN_OCORRENCIAS = 3
+            df_ia_t5 = df_ia.copy()
+            df_ia_t5['wmape_janela'] = df_ia_t5['wmape_melhor']
+            df_top10 = (df_ia_t5.dropna(subset=['wmape_melhor'])
+                        .sort_values('wmape_melhor', ascending=False)
                         .head(10).reset_index(drop=True).copy())
             df_top10['wmape_pct'] = (df_top10['wmape_melhor'] * 100).round(1)
 
-        st.caption(f"Top 10 piores WMAPE calculado sobre os últimos **{f_n_meses} meses** do histórico.")
+        _n_validos = int((df_ia_t5['wmape_janela'].notna()).sum()) if 'wmape_janela' in df_ia_t5.columns else len(df_ia)
+        st.caption(
+            f"Top 10 piores WMAPE calculado sobre os últimos **{f_n_meses} meses** do histórico. "
+            f"SKUs com menos de {_MIN_OCORRENCIAS} ocorrências no período foram excluídos. "
+            f"({_n_validos} SKUs elegíveis)"
+        )
 
         # Converter SKU para string — garante eixo categórico no Plotly
         df_top10['sku_str'] = 'SKU ' + df_top10['sku'].astype(str)
         df_top10['sugestao'] = df_top10.apply(
-            lambda r: gerar_sugestao(r.to_dict(), r.get('wmape_janela', r['wmape_melhor'])), axis=1
+            lambda r: gerar_sugestao(
+                r.to_dict(),
+                r['wmape_janela'] if 'wmape_janela' in r and pd.notna(r.get('wmape_janela')) else r.get('wmape_melhor', np.nan)
+            ), axis=1
         )
 
         # Gráfico de barras horizontal
+        df_top10 = df_top10.dropna(subset=['wmape_pct']).reset_index(drop=True)
         df_plot_top = df_top10.sort_values('wmape_pct').copy()
         fig_top = px.bar(
             df_plot_top,
