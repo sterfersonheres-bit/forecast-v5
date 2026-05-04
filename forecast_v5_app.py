@@ -682,6 +682,41 @@ def exportar_excel_visual(abas: dict, filename_prefix: str = 'forecast') -> io.B
     return buf
 
 
+@st.cache_data(show_spinner=False)
+def calcular_wmape_janela(_df_base_hash, df_base_ref, col_sku_r, col_periodo_r,
+                          col_ano_r, col_demanda_r, df_ia_ref, df_bt_ref, n_meses: int):
+    meses_ord_c = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,
+                   "jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+    _df_per = df_base_ref[[col_ano_r, col_periodo_r]].copy()
+    _df_per["_mn"] = _df_per[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_c).fillna(0).astype(int)
+    _df_per["_an"] = pd.to_numeric(_df_per[col_ano_r], errors="coerce").fillna(0).astype(int)
+    _periodos_sorted = (_df_per[["_an","_mn"]].drop_duplicates()
+                        .sort_values(["_an","_mn"]).tail(n_meses))
+    _periodo_keys = set(zip(_periodos_sorted["_an"], _periodos_sorted["_mn"]))
+    _df_full = df_base_ref.copy()
+    _df_full["__mn"] = _df_full[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_c).fillna(0).astype(int)
+    _df_full["__an"] = pd.to_numeric(_df_full[col_ano_r], errors="coerce").fillna(0).astype(int)
+    _df_full["__key"] = list(zip(_df_full["__an"], _df_full["__mn"]))
+    _df_full = _df_full[_df_full["__key"].isin(_periodo_keys)]
+    MIN_REG = 3
+    wmape_map, nreg_map = {}, {}
+    for _sku in df_ia_ref["sku"].unique():
+        _s = (_df_full[_df_full[col_sku_r] == _sku]
+              .sort_values(["__an","__mn"])[col_demanda_r]
+              .reset_index(drop=True).astype(float))
+        n = len(_s)
+        nreg_map[_sku] = n
+        if n >= MIN_REG:
+            _rb = df_bt_ref[df_bt_ref["sku"] == _sku] if df_bt_ref is not None else pd.DataFrame()
+            _met = _rb.iloc[0]["melhor_metodo"] if len(_rb) > 0 else "MA-3"
+            _fn = METODOS[_met]
+            _nt = min(2, max(1, n - 2))
+            _w, _, _ = backtest_sku(_s, _fn, n_test=_nt)
+            wmape_map[_sku] = _w if pd.notna(_w) else np.nan
+        else:
+            wmape_map[_sku] = np.nan
+    return wmape_map, nreg_map, MIN_REG, _periodo_keys
+
 # Manter compatibilidade com código legado
 def exportar_excel(df_bt, df_ia, df_top10):
     abas = {
@@ -1837,56 +1872,26 @@ def main():
         )
         f_n_meses = int(f_periodo_label.split()[0])
 
-        # Recalcular WMAPE por janela — usando base histórica filtrada
+        # Recalcular WMAPE por janela — CACHEADO (só recalcula quando n_meses muda)
         if col_periodo and col_ano:
-            # Identificar os N últimos meses disponíveis na base
-            _df_per_t5 = df_base[[col_ano, col_periodo]].copy()
-            _df_per_t5['_mn'] = _df_per_t5[col_periodo].astype(str).str.lower().str[:3].map(_meses_ord_t5).fillna(0).astype(int)
-            _df_per_t5['_an'] = pd.to_numeric(_df_per_t5[col_ano], errors='coerce').fillna(0).astype(int)
-            _periodos_sorted = (_df_per_t5[['_an','_mn']].drop_duplicates()
-                                .sort_values(['_an','_mn'])
-                                .tail(f_n_meses))
-            _periodo_keys = set(zip(_periodos_sorted['_an'], _periodos_sorted['_mn']))
-
-            def _filtrar_serie(sku):
-                _df_sku = df_base[df_base[col_sku] == sku].copy()
-                _df_sku['_mn'] = _df_sku[col_periodo].astype(str).str.lower().str[:3].map(_meses_ord_t5).fillna(0).astype(int)
-                _df_sku['_an'] = pd.to_numeric(_df_sku[col_ano], errors='coerce').fillna(0).astype(int)
-                _df_sku = _df_sku[_df_sku.apply(lambda r: (r['_an'], r['_mn']) in _periodo_keys, axis=1)]
-                return _df_sku.sort_values(['_an','_mn'])[col_demanda].reset_index(drop=True).astype(float)
-
-            # Recalcular WMAPE backtesting para janela filtrada
-            # Regra: SKU precisa ter pelo menos 3 REGISTROS no período (presença na base),
-            # independentemente de ter demanda zero. SKUs ausentes do período são excluídos.
-            _MIN_REGISTROS = 3
-            _wmape_filtrado = {}
-            _n_registros    = {}
-            for _sku in df_ia['sku'].unique():
-                _serie_f = _filtrar_serie(_sku)
-                _n_reg = len(_serie_f)           # quantos meses o SKU aparece na janela
-                _n_registros[_sku] = _n_reg
-                if _n_reg >= _MIN_REGISTROS:
-                    _row_bt = df_bt[df_bt['sku'] == _sku] if df_bt is not None else pd.DataFrame()
-                    _met = _row_bt.iloc[0]['melhor_metodo'] if len(_row_bt) > 0 else 'MA-3'
-                    _fn  = METODOS[_met]
-                    # n_test: mínimo 1, máximo 2 para janelas curtas (3-6 meses)
-                    _n_test = min(2, max(1, _n_reg - 2))
-                    _w, _, _ = backtest_sku(_serie_f, _fn, n_test=_n_test)
-                    _wmape_filtrado[_sku] = _w if pd.notna(_w) else np.nan
-                else:
-                    _wmape_filtrado[_sku] = np.nan  # NaN = excluído (< 3 registros no período)
+            # Hash do dataframe para invalidar cache se os dados mudarem
+            _base_hash = str(len(df_base)) + str(df_base[col_demanda].sum())
+            with st.spinner(f"Calculando WMAPE — janela {f_n_meses} meses..."):
+                _wmape_filtrado, _n_registros, _MIN_REGISTROS, _periodo_keys = calcular_wmape_janela(
+                    _base_hash, df_base, col_sku, col_periodo,
+                    col_ano, col_demanda, df_ia, df_bt, f_n_meses
+                )
 
             df_ia_t5 = df_ia.copy()
-            df_ia_t5['wmape_janela']   = df_ia_t5['sku'].map(_wmape_filtrado)
-            df_ia_t5['n_registros']    = df_ia_t5['sku'].map(_n_registros)
-            # Remover SKUs sem ocorrências suficientes antes de rankear
+            df_ia_t5['wmape_janela'] = df_ia_t5['sku'].map(_wmape_filtrado)
+            df_ia_t5['n_registros']  = df_ia_t5['sku'].map(_n_registros)
             df_ia_t5_validos = df_ia_t5.dropna(subset=['wmape_janela'])
             df_top10 = (df_ia_t5_validos
                         .sort_values('wmape_janela', ascending=False)
                         .head(10).reset_index(drop=True).copy())
             df_top10['wmape_pct'] = (df_top10['wmape_janela'] * 100).round(1)
         else:
-            _MIN_OCORRENCIAS = 3
+            _MIN_REGISTROS = 3
             df_ia_t5 = df_ia.copy()
             df_ia_t5['wmape_janela'] = df_ia_t5['wmape_melhor']
             df_top10 = (df_ia_t5.dropna(subset=['wmape_melhor'])
@@ -2014,6 +2019,211 @@ def main():
                 use_container_width=True
             )
 
+
+    # ─────────────────────────────────────────────────────────
+    # TAB 6: GUIA DO USUÁRIO
+    # ─────────────────────────────────────────────────────────
+    with tab6:
+        css = """
+<style>
+.guia-card{background:#f0f9f8;border-left:4px solid #0D9488;border-radius:8px;
+           padding:14px 18px;margin-bottom:12px;}
+.guia-card h4{color:#0F2B4F;margin:0 0 6px 0;}
+.guia-card p,.guia-card li{color:#334155;font-size:14px;margin:2px 0;}
+.guia-badge{display:inline-block;padding:2px 10px;border-radius:12px;
+             font-size:12px;font-weight:600;color:white;}
+.bg-green{background:#22C55E;}.bg-teal{background:#0D9488;}
+.bg-yellow{background:#EAB308;color:#1e1e1e;}.bg-red{background:#EF4444;}
+</style>"""
+        st.markdown(css, unsafe_allow_html=True)
+
+        st.markdown("## 📖 Guia do Usuário — Forecast Inteligente V5")
+        st.markdown("*Manual de referência para analistas de demanda e planejamento*")
+        st.divider()
+
+        # ── OBJETIVO ────────────────────────────────────────
+        st.markdown("### 🎯 Objetivo da Ferramenta")
+        st.markdown(
+            "O **Forecast Inteligente V5** combina **9 métodos estatísticos** com **Inteligência Artificial "
+            "(Gradient Boosting)** treinada individualmente por SKU. "
+            "O objetivo central é **reduzir o WMAPE** em relação ao modelo atual e fornecer ao analista "
+            "de demanda uma base analítica robusta para tomada de decisão. "
+            "A ferramenta **não substitui o julgamento do analista** — ela o apoia com evidências "
+            "quantitativas, classificação automática de perfis e diagnóstico de SKUs problemáticos."
+        )
+        st.divider()
+
+        # ── CONCEITOS ────────────────────────────────────────
+        st.markdown("### 📐 Conceitos Fundamentais")
+        col_c1, col_c2 = st.columns(2)
+
+        with col_c1:
+            st.markdown(
+                '<div class="guia-card"><h4>📊 WMAPE — Indicador Principal</h4>'
+                '<p>Mede o erro de previsão ponderado pela demanda real:</p>'
+                '<p style="font-family:monospace;background:#e2e8f0;padding:4px 8px;border-radius:4px">'
+                'WMAPE = Σ|Real − Prev| ÷ Σ|Real|</p>'
+                '<p>Meta do pipeline V5: <b>&lt; 35%</b></p><br>'
+                '<span class="guia-badge bg-green">&lt;20% Excelente</span>&nbsp;'
+                '<span class="guia-badge bg-teal">20–35% Bom</span>&nbsp;'
+                '<span class="guia-badge bg-yellow">35–60% Regular</span>&nbsp;'
+                '<span class="guia-badge bg-red">&gt;60% Crítico</span></div>',
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                '<div class="guia-card"><h4>🔄 Walk-Forward Validation</h4>'
+                '<p>Simula como cada método <b>teria se saído no passado real</b>, treinando apenas com '
+                'dados anteriores. Evita o data leakage e garante que o WMAPE calculado é o que o método '
+                'produziria na prática.</p>'
+                '<p><b>Exemplo (3 períodos):</b> Treina Jan–Set → prevê Out | '
+                'Treina Jan–Out → prevê Nov | Treina Jan–Nov → prevê Dez.</p></div>',
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                '<div class="guia-card"><h4>📈 FVA — Forecast Value Added</h4>'
+                '<p>Mede se a <b>intervenção manual do analista</b> melhora ou piora a previsão estatística. '
+                'FVA positivo = analista agrega valor. FVA negativo = ferramenta acerta mais.</p>'
+                '<p>Use para identificar SKUs onde o ajuste manual é bem-vindo e onde é melhor confiar no modelo.</p></div>',
+                unsafe_allow_html=True
+            )
+
+        with col_c2:
+            st.markdown(
+                '<div class="guia-card"><h4>🏷️ Classificação da Demanda (CV)</h4>'
+                '<ul>'
+                '<li><b>🟢 Estável</b> — CV &lt; 0,25. Previsível. Use MA-6 ou SES.</li>'
+                '<li><b>🟡 Variável</b> — CV 0,25–0,60. Use SES ou Holt.</li>'
+                '<li><b>🔴 Errática</b> — CV &gt; 0,60. Alta volatilidade. Revisar dados.</li>'
+                '<li><b>⚪ Intermitente</b> — Mais de 50% de zeros. Use Croston.</li>'
+                '<li><b>🔵 Esporádica</b> — Zeros frequentes + alta variação.</li>'
+                '</ul></div>',
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                '<div class="guia-card"><h4>⭐ TriM-Heres — Método Sazonal</h4>'
+                '<p>Captura <b>sazonalidade trimestral</b> sem exigir séries longas. '
+                'Para prever Jul/26, usa Mai+Jun+Jul de 2024 e 2025 (média das 6 obs). '
+                'Se não tiver as 6, pondera com a média anual proporcionalmente. '
+                'Recomendado quando <b>ACF lag-12 &gt; 0,4</b>.</p></div>',
+                unsafe_allow_html=True
+            )
+            st.markdown(
+                '<div class="guia-card"><h4>🤖 IA — Gradient Boosting por SKU</h4>'
+                '<p>Treinada individualmente com features de lag (últimos 6 valores, médias móveis, desvio padrão). '
+                'Aprende padrões não-lineares invisíveis aos modelos clássicos.</p>'
+                '<p><b>Previsão combinada:</b> ajuste o slider de peso IA vs estatístico conforme o perfil do SKU. '
+                'Para séries curtas (&lt;14 períodos), a IA não é treinada.</p></div>',
+                unsafe_allow_html=True
+            )
+
+        st.divider()
+
+        # ── GUIA POR ABA ─────────────────────────────────────
+        st.markdown("### 🗂️ O Que Fazer em Cada Aba")
+
+        abas_guia = [
+            ("📊 Simulação Retrospectiva", "Diagnóstico e benchmarking de métodos", [
+                "Analise a tabela resumo: veja quantos SKUs cada método consegue abaixo de 35% de WMAPE.",
+                "Compare o ganho vs original: a coluna '▲/▼ Ganho vs Original' mostra se o V5 melhora em relação ao arquivo atual.",
+                "Use o box plot para entender a dispersão — métodos com mediana baixa mas máximo alto têm SKUs problemáticos específicos.",
+                "Na tabela mensal (parte inferior): selecione o mês fechado mais recente e compare Realizado × Prev. Original × Melhor Prev. V5 por SKU.",
+                "Ação esperada: identificar o método com melhor desempenho global e validar o ganho para justificar a adoção.",
+            ]),
+            ("🎯 Seletor de Método", "Qual método usar por SKU", [
+                "Filtre por classificação (ex: Intermitente) para ver todos os SKUs daquele perfil e o melhor método identificado.",
+                "Use o heatmap 'Classificação × Melhor Método' para confirmar se as regras de recomendação estão sendo seguidas.",
+                "Exporte a tabela e use como insumo na revisão do Plano de Demandas.",
+                "SKUs com WMAPE alto mesmo no melhor método são candidatos a revisão manual do histórico.",
+            ]),
+            ("🔍 Análise por SKU", "Investigação individual de comportamento", [
+                "Analise o histórico: há tendência? Sazonalidade? Quebra estrutural recente?",
+                "O gráfico de ACF mostra correlação com períodos passados. Barras além das linhas pontilhadas = memória na série.",
+                "Compare as 9 previsões lado a lado: grande divergência entre elas indica demanda imprevisível.",
+                "Para SKUs com ACF positivo no lag 12, aplique TriM-Heres. Para séries com quebra recente, revise o histórico base.",
+            ]),
+            ("🤖 IA + Previsão", "Previsão para os próximos 3 meses (M+1/M+2/M+3)", [
+                "Ajuste o slider de peso: mais IA para séries longas e estáveis; menos IA para séries curtas ou erráticas.",
+                "No gráfico IA vs Modelo Estatístico, verifique se a IA está capturando o padrão histórico.",
+                "A tabela 'Horizonte 3 Meses' exibe M+1/M+2/M+3 em relação ao mês vigente — atualiza automaticamente a cada mês.",
+                "Exporte o horizonte em Excel e use como insumo direto no ciclo N1 do Plano de Demandas.",
+            ]),
+            ("📋 Top 10 Piores WMAPE", "Priorização e ação nos SKUs críticos", [
+                "Use o seletor de janela (3/6/12 meses) para distinguir problemas pontuais de problemas estruturais.",
+                "Para cada SKU, leia o diagnóstico da IA e avalie a sugestão de método ou ação corretiva.",
+                "Mini-gráfico: identifique outlier, quebra ou sazonalidade não capturada.",
+                "Defina uma ação por SKU — revisão do histórico, ajuste manual do plano, ou uso do método sugerido.",
+                "Exporte o relatório em Excel para documentar as ações no ciclo de S&OP.",
+            ]),
+        ]
+
+        for nome_aba, objetivo, passos in abas_guia:
+            with st.expander(f"{nome_aba} — {objetivo}", expanded=False):
+                st.markdown(f"**Objetivo:** {objetivo}")
+                st.markdown("**Passo a passo do analista:**")
+                for p in passos:
+                    st.markdown(f"- {p}")
+
+        st.divider()
+
+        # ── FAQs ─────────────────────────────────────────────
+        st.markdown("### ❓ Perguntas Frequentes")
+
+        faqs = [
+            ("Por que o WMAPE médio é alto mas a maioria dos SKUs está bem?",
+             "SKUs com demanda muito baixa podem ter WMAPE de 500%+, distorcendo a média. "
+             "Sempre analise a **mediana** do WMAPE, que é mais robusta a outliers. "
+             "WMAPE mediana de 35% significa que metade dos SKUs erra menos que 35%."),
+            ("Quando confiar mais na IA do que no modelo estatístico?",
+             "Prefira a IA quando: (1) a série tem mais de 18 períodos, (2) o WMAPE in-sample da IA é menor que o do melhor método estatístico, "
+             "e (3) a demanda tem padrões não-lineares. Use menos IA quando: a série é curta, a demanda é intermitente, ou o WMAPE in-sample é alto."),
+            ("O que fazer quando nenhum método tem WMAPE abaixo de 60%?",
+             "Ações recomendadas: (1) revisar o histórico e remover outliers, "
+             "(2) verificar se há quebra estrutural (novo projeto, novo cliente), "
+             "(3) adotar estoque de segurança maior em vez de depender da previsão, "
+             "(4) classificar como demanda errática e planejar por disponibilidade mínima."),
+            ("Qual a diferença entre WMAPE de backtesting e WMAPE in-sample da IA?",
+             "O **WMAPE de backtesting** é medido em dados que o modelo nunca viu (walk-forward) — é o mais confiável. "
+             "O **WMAPE in-sample da IA** é medido nos dados de treino — tende a ser otimista. "
+             "Para decisão, sempre prefira o WMAPE de backtesting."),
+            ("Como usar o horizonte de 3 meses no ciclo de planejamento?",
+             "Exporte a tabela no início de cada ciclo N1. Os valores de M+1 são os mais confiáveis. "
+             "M+2 e M+3 têm incerteza crescente — use como referência mas aplique julgamento sobre eventos conhecidos. "
+             "Ao fechar um mês, o horizonte avança automaticamente."),
+            ("Por que a janela de 3 meses do Top 10 pode mostrar resultados diferentes da janela de 12 meses?",
+             "A janela de 3 meses avalia o WMAPE apenas nos últimos 3 meses disponíveis na base. "
+             "Se um SKU teve um evento atípico recente (ex.: entrega antecipada, parada de obra), "
+             "o WMAPE de 3 meses será alto mas o de 12 meses pode ser baixo. "
+             "Use essa comparação para distinguir problemas pontuais de problemas estruturais."),
+        ]
+
+        for pergunta, resposta in faqs:
+            with st.expander(f"❓ {pergunta}"):
+                st.markdown(resposta)
+
+        st.divider()
+
+        # ── LIMITAÇÕES E BOAS PRÁTICAS ───────────────────────
+        st.markdown("### ⚠️ Limitações e Boas Práticas")
+        col_lim1, col_lim2 = st.columns(2)
+        with col_lim1:
+            st.warning(
+                "**Limitações do pipeline:**\n\n"
+                "- SKUs com menos de 14 períodos não têm modelo de IA\n"
+                "- Holt-Winters exige mínimo de 24 períodos para otimização confiável\n"
+                "- TriM-Heres requer 2 anos de histórico para resultado ideal\n"
+                "- O WMAPE pode ser distorcido por outliers — revise o histórico se suspeitar de dados incorretos\n"
+                "- Eventos disruptivos exigem ajuste manual — a ferramenta assume continuidade do padrão histórico"
+            )
+        with col_lim2:
+            st.success(
+                "**Boas práticas recomendadas:**\n\n"
+                "- Mantenha a base histórica limpa e atualizada mensalmente\n"
+                "- Sempre rode o pipeline com pelo menos 12 meses de histórico\n"
+                "- Use o FVA para medir se a intervenção manual agrega valor\n"
+                "- Documente ajustes manuais feitos sobre a previsão do pipeline\n"
+                "- Revise o Top 10 mensalmente e defina ação para cada SKU crítico\n"
+                "- Combine a previsão do pipeline com o conhecimento de mercado da equipe comercial"
+            )
 
 # ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
