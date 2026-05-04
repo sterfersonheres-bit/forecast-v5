@@ -1944,7 +1944,7 @@ def main():
                     xaxis_title='', yaxis_title='Demanda',
                     xaxis=dict(tickangle=-45, tickfont=dict(size=9))
                 )
-                st.plotly_chart(fig_mini, use_container_width=True)
+                st.plotly_chart(fig_mini, use_container_width=True, key=f"mini_top10_{i}_{row.sku}")
 
                 # Sugestão IA
                 st.markdown(f"💡 **Sugestão IA:** {row.sugestao}")
