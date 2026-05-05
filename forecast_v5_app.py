@@ -45,8 +45,8 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Forecast Inteligente V5",
-    page_icon="📈",
+    page_title="SONAR — Forecast de Demanda",
+    page_icon="📡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -815,8 +815,8 @@ def gerar_sugestao(row_ia, wmape_val):
 def main():
     # ─── SIDEBAR ───────────────────────────────────────────────
     with st.sidebar:
-        st.markdown("## 📈 Forecast V5")
-        st.markdown("*IA + Backtesting + Análise SKU*")
+        st.markdown("## 📡 SONAR")
+        st.markdown("*Supply & Operations Near-real-time Analytics & Recommendation*")
         st.divider()
 
         uploaded_file = st.file_uploader(
@@ -846,8 +846,8 @@ def main():
             st.rerun()
 
     # ─── CABEÇALHO ─────────────────────────────────────────────
-    st.title("📈 Forecast Inteligente V5")
-    st.caption("Pipeline de previsão de demanda com IA | Backtesting Retrospectivo | Análise por SKU")
+    st.title("📡 SONAR")
+    st.caption("Supply & Operations Near-real-time Analytics & Recommendation  |  IA + Backtesting + Análise por SKU")
 
     # ─── CARREGAR DADOS ────────────────────────────────────────
     with st.spinner("Carregando arquivo Excel..."):
@@ -2065,14 +2065,14 @@ def main():
 </style>"""
         st.markdown(css, unsafe_allow_html=True)
 
-        st.markdown("## 📖 Guia do Usuário — Forecast Inteligente V5")
+        st.markdown("## 📖 Guia do Usuário — SONAR")
         st.markdown("*Manual de referência para analistas de demanda e planejamento*")
         st.divider()
 
         # ── OBJETIVO ────────────────────────────────────────
         st.markdown("### 🎯 Objetivo da Ferramenta")
         st.markdown(
-            "O **Forecast Inteligente V5** combina **9 métodos estatísticos** com **Inteligência Artificial "
+            "O **SONAR** (*Supply & Operations Near-real-time Analytics & Recommendation*) combina **9 métodos estatísticos** com **Inteligência Artificial "
             "(Gradient Boosting)** treinada individualmente por SKU. "
             "O objetivo central é **reduzir o WMAPE** em relação ao modelo atual e fornecer ao analista "
             "de demanda uma base analítica robusta para tomada de decisão. "
