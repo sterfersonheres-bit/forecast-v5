@@ -700,21 +700,62 @@ def calcular_wmape_janela(_df_base_hash, df_base_ref, col_sku_r, col_periodo_r,
     _df_full = _df_full[_df_full["__key"].isin(_periodo_keys)]
     MIN_REG = 3
     wmape_map, nreg_map = {}, {}
+
+    # Buscar série COMPLETA (histórico todo) para cada SKU — usada como treino
+    # quando a janela filtrada é curta demais para walk-forward
+    _df_full_sku = df_base_ref.copy()
+    _df_full_sku["__mn2"] = _df_full_sku[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_c).fillna(0).astype(int)
+    _df_full_sku["__an2"] = pd.to_numeric(_df_full_sku[col_ano_r], errors="coerce").fillna(0).astype(int)
+
     for _sku in df_ia_ref["sku"].unique():
+        # Série filtrada pela janela
         _s = (_df_full[_df_full[col_sku_r] == _sku]
               .sort_values(["__an","__mn"])[col_demanda_r]
               .reset_index(drop=True).astype(float))
         n = len(_s)
         nreg_map[_sku] = n
-        if n >= MIN_REG:
-            _rb = df_bt_ref[df_bt_ref["sku"] == _sku] if df_bt_ref is not None else pd.DataFrame()
-            _met = _rb.iloc[0]["melhor_metodo"] if len(_rb) > 0 else "MA-3"
-            _fn = METODOS[_met]
+
+        if n < MIN_REG:
+            wmape_map[_sku] = np.nan
+            continue
+
+        _rb = df_bt_ref[df_bt_ref["sku"] == _sku] if df_bt_ref is not None else pd.DataFrame()
+        _met = _rb.iloc[0]["melhor_metodo"] if len(_rb) > 0 else "MA-3"
+        _fn = METODOS[_met]
+
+        if n >= 5:
+            # Janela longa o suficiente — walk-forward normal
             _nt = min(2, max(1, n - 2))
             _w, _, _ = backtest_sku(_s, _fn, n_test=_nt)
             wmape_map[_sku] = _w if pd.notna(_w) else np.nan
         else:
-            wmape_map[_sku] = np.nan
+            # Janela curta (3-4 meses): treina na série completa e prediz cada ponto da janela
+            # Isso é um WMAPE de validação cruzada simples — não é walk-forward puro,
+            # mas é a melhor aproximação possível para janelas muito curtas
+            _s_full = (_df_full_sku[_df_full_sku[col_sku_r] == _sku]
+                       .sort_values(["__an2","__mn2"])[col_demanda_r]
+                       .reset_index(drop=True).astype(float))
+            # Pegar o histórico anterior à janela como treino
+            _n_full = len(_s_full)
+            _n_antes = _n_full - n   # períodos antes da janela
+            if _n_antes >= 3:
+                _s_treino = _s_full.iloc[:_n_antes]
+            else:
+                _s_treino = _s_full  # fallback: usar toda a série
+
+            try:
+                _pred_fixo = _fn(_s_treino, h=1)[0]
+                # WMAPE: mesmo preditor fixo para todos os meses da janela
+                _actual = _s.values
+                _denom = np.sum(np.abs(_actual))
+                if _denom > 0:
+                    _w = np.sum(np.abs(_actual - _pred_fixo)) / _denom
+                    wmape_map[_sku] = float(_w)
+                else:
+                    wmape_map[_sku] = np.nan
+            except Exception:
+                wmape_map[_sku] = np.nan
+
     return wmape_map, nreg_map, MIN_REG, _periodo_keys
 
 # Manter compatibilidade com código legado
@@ -1861,145 +1902,132 @@ def main():
             st.stop()
 
         # ── Filtro de período histórico ──────────────────────────
-        _meses_ord_t5 = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
-                         'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
-        _mn_t5 = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',
-                  7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
+        # ── Calcular ambas as janelas simultaneamente (cacheado) ──
+        _base_hash = str(len(df_base)) + str(df_base[col_demanda].sum()) if col_periodo and col_ano else ""
 
-        f_periodo_label = st.radio(
-            "📅 Janela histórica para cálculo do WMAPE",
-            options=["3 Meses","6 Meses","12 Meses"],
-            index=2, horizontal=True, key='top10_periodo'
-        )
-        f_n_meses = int(f_periodo_label.split()[0])
-
-        # Recalcular WMAPE por janela — CACHEADO (só recalcula quando n_meses muda)
-        if col_periodo and col_ano:
-            # Hash do dataframe para invalidar cache se os dados mudarem
-            _base_hash = str(len(df_base)) + str(df_base[col_demanda].sum())
-            with st.spinner(f"Calculando WMAPE — janela {f_n_meses} meses..."):
-                _wmape_filtrado, _n_registros, _MIN_REGISTROS, _periodo_keys = calcular_wmape_janela(
+        def _build_top10(n_meses, col_prefix):
+            """Monta o dataframe top10 para uma janela de n_meses."""
+            if col_periodo and col_ano:
+                _wmap, _nreg, _MIN_R, _ = calcular_wmape_janela(
                     _base_hash, df_base, col_sku, col_periodo,
-                    col_ano, col_demanda, df_ia, df_bt, f_n_meses
+                    col_ano, col_demanda, df_ia, df_bt, n_meses
                 )
+                _df = df_ia.copy()
+                _df["wmape_janela"] = _df["sku"].map(_wmap)
+                _df = _df.dropna(subset=["wmape_janela"])
+                _df = _df.sort_values("wmape_janela", ascending=False).head(10).reset_index(drop=True)
+                _df["wmape_pct"] = (_df["wmape_janela"] * 100).round(1)
+            else:
+                _MIN_R = 3
+                _df = df_ia.dropna(subset=["wmape_melhor"]).sort_values("wmape_melhor", ascending=False).head(10).reset_index(drop=True).copy()
+                _df["wmape_pct"] = (_df["wmape_melhor"] * 100).round(1)
+            _df = _df.dropna(subset=["wmape_pct"]).reset_index(drop=True)
+            _df["sku_str"] = "SKU " + _df["sku"].astype(str)
+            _df["sugestao"] = _df.apply(
+                lambda r: gerar_sugestao(
+                    r.to_dict(),
+                    r["wmape_janela"] if "wmape_janela" in r.index and pd.notna(r.get("wmape_janela")) else r.get("wmape_melhor", np.nan)
+                ), axis=1
+            )
+            return _df
 
-            df_ia_t5 = df_ia.copy()
-            df_ia_t5['wmape_janela'] = df_ia_t5['sku'].map(_wmape_filtrado)
-            df_ia_t5['n_registros']  = df_ia_t5['sku'].map(_n_registros)
-            df_ia_t5_validos = df_ia_t5.dropna(subset=['wmape_janela'])
-            df_top10 = (df_ia_t5_validos
-                        .sort_values('wmape_janela', ascending=False)
-                        .head(10).reset_index(drop=True).copy())
-            df_top10['wmape_pct'] = (df_top10['wmape_janela'] * 100).round(1)
-        else:
-            _MIN_REGISTROS = 3
-            df_ia_t5 = df_ia.copy()
-            df_ia_t5['wmape_janela'] = df_ia_t5['wmape_melhor']
-            df_top10 = (df_ia_t5.dropna(subset=['wmape_melhor'])
-                        .sort_values('wmape_melhor', ascending=False)
-                        .head(10).reset_index(drop=True).copy())
-            df_top10['wmape_pct'] = (df_top10['wmape_melhor'] * 100).round(1)
+        def _render_panel(df_t, janela_label, col_prefix, col_container):
+            """Renderiza gráfico + detalhamento para um painel."""
+            with col_container:
+                st.markdown(f"#### 📋 Top 10 — Últimos **{janela_label}**")
+                n_elig = len(df_ia) if df_ia is not None else 0
+                st.caption(f"{len(df_t)} SKUs exibidos | {n_elig} SKUs elegíveis")
 
-        _n_validos = int((df_ia_t5['wmape_janela'].notna()).sum()) if 'wmape_janela' in df_ia_t5.columns else len(df_ia)
-        st.caption(
-            f"Top 10 piores WMAPE calculado sobre os últimos **{f_n_meses} meses** do histórico. "
-            f"SKUs com menos de {_MIN_REGISTROS} registros na janela selecionada foram excluídos. "
-            f"({_n_validos} SKUs elegíveis)"
-        )
+                if len(df_t) == 0:
+                    st.info("Nenhum SKU com dados suficientes nesta janela.")
+                    return
 
-        # Converter SKU para string — garante eixo categórico no Plotly
-        df_top10['sku_str'] = 'SKU ' + df_top10['sku'].astype(str)
-        df_top10['sugestao'] = df_top10.apply(
-            lambda r: gerar_sugestao(
-                r.to_dict(),
-                r['wmape_janela'] if 'wmape_janela' in r and pd.notna(r.get('wmape_janela')) else r.get('wmape_melhor', np.nan)
-            ), axis=1
-        )
-
-        # Gráfico de barras horizontal
-        df_top10 = df_top10.dropna(subset=['wmape_pct']).reset_index(drop=True)
-        df_plot_top = df_top10.sort_values('wmape_pct').copy()
-        fig_top = px.bar(
-            df_plot_top,
-            x='wmape_pct', y='sku_str', orientation='h',
-            title='Top 10 SKUs — Pior WMAPE',
-            color='wmape_pct', color_continuous_scale='RdYlGn_r',
-            template='plotly_white',
-            labels={'wmape_pct': 'WMAPE (%)', 'sku_str': 'SKU'},
-            text='wmape_pct',
-            category_orders={'sku_str': df_plot_top['sku_str'].tolist()}
-        )
-        fig_top.update_traces(texttemplate='%{text:.1f}%', textposition='inside')
-        fig_top.update_layout(
-            showlegend=False, coloraxis_showscale=False, height=420,
-            yaxis=dict(type='category')
-        )
-        st.plotly_chart(fig_top, use_container_width=True)
-
-        st.divider()
-        st.markdown("### ⚠️ Detalhamento por SKU")
-
-        for i, row in enumerate(df_top10.itertuples()):
-            wmape_color = cor_wmape(row.wmape_melhor)
-            badge = f'<span style="background:{wmape_color};color:white;padding:3px 10px;border-radius:10px;font-size:13px">{row.wmape_pct:.1f}%</span>'
-
-            with st.expander(
-                f"#{i+1}  |  SKU: {row.sku}  |  WMAPE: {row.wmape_pct:.1f}%  |  {row.classificacao}",
-                expanded=(i < 3)
-            ):
-                st.markdown(badge, unsafe_allow_html=True)
-
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Classificação",   row.classificacao)
-                c2.metric("Tendência",        row.tendencia.split(' ')[-1] if ' ' in str(row.tendencia) else row.tendencia)
-                c3.metric("Prev. Combinada", f"{row.previsao_combinada:.1f}")
-                c4.metric("Melhor Método",   row.melhor_metodo)
-
-                # Mini gráfico com eixo X em meses
-                _df_mini = df_base[df_base[col_sku] == row.sku].copy()
-                if col_periodo and col_ano:
-                    _mord = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
-                             'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
-                    _df_mini['_mn'] = _df_mini[col_periodo].astype(str).str.lower().str[:3].map(_mord).fillna(0)
-                    _df_mini['_an'] = pd.to_numeric(_df_mini[col_ano], errors='coerce').fillna(0)
-                    _df_mini = _df_mini.sort_values(['_an','_mn'])
-                    x_mini = [f"{str(r[col_periodo]).lower()[:3]}/{str(int(r[col_ano]))[-2:]}"
-                               for _, r in _df_mini.iterrows()]
-                    s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
-                else:
-                    s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
-                    x_mini = list(range(len(s_mini)))
-
-                fig_mini = go.Figure()
-                fig_mini.add_trace(go.Scatter(
-                    x=x_mini, y=s_mini.values, mode='lines+markers',
-                    line=dict(color=wmape_color, width=2), marker=dict(size=5)
-                ))
-                fig_mini.add_hline(y=s_mini.mean(), line_dash='dash',
-                                   line_color='gray', annotation_text='Média')
-                fig_mini.update_layout(
-                    height=180, template='plotly_white',
-                    showlegend=False,
-                    margin=dict(l=20, r=20, t=20, b=20),
-                    xaxis_title='', yaxis_title='Demanda',
-                    xaxis=dict(tickangle=-45, tickfont=dict(size=9))
+                # Gráfico de barras
+                df_plot = df_t.sort_values("wmape_pct").copy()
+                fig = px.bar(
+                    df_plot,
+                    x="wmape_pct", y="sku_str", orientation="h",
+                    color="wmape_pct", color_continuous_scale="RdYlGn_r",
+                    template="plotly_white",
+                    labels={"wmape_pct": "WMAPE (%)", "sku_str": "SKU"},
+                    text="wmape_pct",
+                    category_orders={"sku_str": df_plot["sku_str"].tolist()}
                 )
-                st.plotly_chart(fig_mini, use_container_width=True, key=f"mini_top10_{i}_{row.sku}")
+                fig.update_traces(texttemplate="%{text:.1f}%", textposition="inside")
+                fig.update_layout(
+                    showlegend=False, coloraxis_showscale=False, height=360,
+                    yaxis=dict(type="category"),
+                    margin=dict(l=10, r=10, t=10, b=10)
+                )
+                st.plotly_chart(fig, use_container_width=True, key=f"bar_{col_prefix}")
 
-                # Sugestão IA
-                st.markdown(f"💡 **Sugestão IA:** {row.sugestao}")
+                st.markdown("**Detalhamento por SKU:**")
+                for i, row in enumerate(df_t.itertuples()):
+                    wmape_color = cor_wmape(row.wmape_melhor)
+                    badge = (f'<span style="background:{wmape_color};color:white;'
+                             f'padding:2px 8px;border-radius:8px;font-size:12px">'
+                             f'{row.wmape_pct:.1f}%</span>')
+                    with st.expander(
+                        f"#{i+1} SKU: {row.sku} | {row.wmape_pct:.1f}% | {row.classificacao}",
+                        expanded=(i < 2)
+                    ):
+                        st.markdown(badge, unsafe_allow_html=True)
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Classificação",  row.classificacao)
+                        c2.metric("Tendência",       row.tendencia.split(" ")[-1] if " " in str(row.tendencia) else row.tendencia)
+                        c3.metric("Prev. Combinada", f"{row.previsao_combinada:.1f}")
+                        c4.metric("Melhor Método",   row.melhor_metodo)
 
-        # Exportação
+                        # Mini gráfico
+                        _df_mini = df_base[df_base[col_sku] == row.sku].copy()
+                        if col_periodo and col_ano:
+                            _mord2 = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,
+                                      "jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+                            _df_mini["_mn"] = _df_mini[col_periodo].astype(str).str.lower().str[:3].map(_mord2).fillna(0)
+                            _df_mini["_an"] = pd.to_numeric(_df_mini[col_ano], errors="coerce").fillna(0)
+                            _df_mini = _df_mini.sort_values(["_an","_mn"])
+                            x_mini = [f"{str(r2[col_periodo]).lower()[:3]}/{str(int(r2[col_ano]))[-2:]}"
+                                      for _, r2 in _df_mini.iterrows()]
+                            s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
+                        else:
+                            s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
+                            x_mini = list(range(len(s_mini)))
+
+                        fig_m = go.Figure()
+                        fig_m.add_trace(go.Scatter(
+                            x=x_mini, y=s_mini.values, mode="lines+markers",
+                            line=dict(color=wmape_color, width=2), marker=dict(size=4)
+                        ))
+                        fig_m.add_hline(y=s_mini.mean(), line_dash="dash",
+                                        line_color="gray", annotation_text="Média")
+                        fig_m.update_layout(
+                            height=160, template="plotly_white", showlegend=False,
+                            margin=dict(l=10, r=10, t=10, b=10),
+                            xaxis=dict(tickangle=-45, tickfont=dict(size=8))
+                        )
+                        st.plotly_chart(fig_m, use_container_width=True,
+                                        key=f"mini_{col_prefix}_{i}_{row.sku}")
+                        st.markdown(f"💡 **Sugestão IA:** {row.sugestao}")
+
+        # ── Renderizar os dois painéis lado a lado ──────────
+        with st.spinner("Calculando Top 10 — janelas 12 e 6 meses..."):
+            df_12 = _build_top10(12, "12m")
+            df_6  = _build_top10(6,  "6m")
+
+        col_12, col_6 = st.columns(2)
+        _render_panel(df_12, "12 Meses", "12m", col_12)
+        _render_panel(df_6,  "6 Meses",  "6m",  col_6)
+
+        # ── Exportação (usa a janela de 12 meses como base) ──
         st.divider()
         st.markdown("### 💾 Exportar Resultados")
-
         col_exp1, col_exp2 = st.columns(2)
         with col_exp1:
-            buf = exportar_excel(df_bt, df_ia, df_top10[['sku','wmape_pct','melhor_metodo',
-                                                           'classificacao','tendencia',
-                                                           'previsao_estatistica','previsao_ia',
-                                                           'previsao_combinada','sugestao']])
-            data_hoje = datetime.date.today().strftime('%d_%m_%Y')
+            buf = exportar_excel(df_bt, df_ia, df_12[["sku","wmape_pct","melhor_metodo",
+                                                        "classificacao","tendencia",
+                                                        "previsao_estatistica","previsao_ia",
+                                                        "previsao_combinada","sugestao"]])
+            data_hoje = datetime.date.today().strftime("%d_%m_%Y")
             st.download_button(
                 label="📥 Baixar Relatório Excel Completo",
                 data=buf,
@@ -2008,10 +2036,8 @@ def main():
                 type="primary",
                 use_container_width=True
             )
-
         with col_exp2:
-            # CSV rápido
-            csv_buf = df_ia.to_csv(index=False).encode('utf-8-sig')
+            csv_buf = df_ia.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
                 label="📥 Baixar Tabela IA (.csv)",
                 data=csv_buf,
@@ -2019,6 +2045,7 @@ def main():
                 mime="text/csv",
                 use_container_width=True
             )
+
 
 
     # ─────────────────────────────────────────────────────────
