@@ -1955,25 +1955,94 @@ def main():
             st.caption(f"{len(df_oos_show)} SKUs exibidos")
 
             if len(df_oos_val) > 0:
+                # Limitar escala ao percentil 95 para não deixar outliers comprimir os pontos
+                _p95 = float(np.percentile(
+                    pd.concat([df_oos_val['wmape_stat_oos'], df_oos_val['wmape_ia_oos']]).dropna(),
+                    95
+                ))
+                _axis_max = round(_p95 * 1.15, 2)
+
+                # Marcar outliers acima do limite
+                df_oos_plot = df_oos_val.copy()
+                df_oos_plot['_x'] = df_oos_plot['wmape_stat_oos'].clip(upper=_axis_max)
+                df_oos_plot['_y'] = df_oos_plot['wmape_ia_oos'].clip(upper=_axis_max)
+                df_oos_plot['_outlier'] = (
+                    (df_oos_val['wmape_stat_oos'] > _axis_max) |
+                    (df_oos_val['wmape_ia_oos']   > _axis_max)
+                )
+
+                # Mapa de cores e labels limpos
+                color_map = {
+                    '✅ IA é mais confiável — aumente o peso no slider':      '#22C55E',
+                    '⚠️ Método estatístico é mais confiável — reduza o peso da IA': '#EF4444',
+                    '➡️ Desempenho similar — peso 50/50 é adequado':          '#F59E0B',
+                }
+                label_map = {
+                    '✅ IA é mais confiável — aumente o peso no slider':      '✅ IA melhor',
+                    '⚠️ Método estatístico é mais confiável — reduza o peso da IA': '⚠️ Estatístico melhor',
+                    '➡️ Desempenho similar — peso 50/50 é adequado':          '➡️ Similar',
+                }
+                df_oos_plot['_label'] = df_oos_plot['recomendacao'].map(label_map).fillna('—')
+
                 fig_oos = px.scatter(
-                    df_oos_val, x='wmape_stat_oos', y='wmape_ia_oos',
-                    hover_data=['sku', 'melhor_metodo'],
-                    color='recomendacao',
+                    df_oos_plot,
+                    x='_x', y='_y',
+                    color='_label',
+                    color_discrete_map={v: color_map.get(k, '#94A3B8')
+                                        for k, v in label_map.items()},
+                    hover_data={'sku': True, 'melhor_metodo': True,
+                                'wmape_stat_oos': ':.1%', 'wmape_ia_oos': ':.1%',
+                                '_x': False, '_y': False, '_label': False,
+                                '_outlier': False, 'recomendacao': False},
                     title='WMAPE Out-of-Sample: IA vs Melhor Método Estatístico',
-                    labels={'wmape_stat_oos': 'WMAPE Estatístico (OOS)',
-                            'wmape_ia_oos':   'WMAPE IA (OOS)'},
-                    template='plotly_white', height=380,
+                    labels={'_x': 'WMAPE Estatístico OOS (%)',
+                            '_y': 'WMAPE IA OOS (%)',
+                            '_label': 'Recomendação'},
+                    template='plotly_white', height=420,
                 )
-                _max_v = max(df_oos_val['wmape_stat_oos'].max(),
-                             df_oos_val['wmape_ia_oos'].max())
-                fig_oos.add_shape(type='line', x0=0, y0=0, x1=_max_v, y1=_max_v,
-                                  line=dict(dash='dash', color='gray', width=1))
+                # Linha de igualdade (IA = Estatístico)
+                fig_oos.add_shape(type='line', x0=0, y0=0,
+                                  x1=_axis_max, y1=_axis_max,
+                                  line=dict(dash='dash', color='#94A3B8', width=1.5))
+                # Rótulos dos eixos em %
+                fig_oos.update_xaxes(
+                    tickformat='.0%', range=[0, _axis_max],
+                    title_text='WMAPE Estatístico OOS'
+                )
+                fig_oos.update_yaxes(
+                    tickformat='.0%', range=[0, _axis_max],
+                    title_text='WMAPE IA OOS'
+                )
+                # Anotações das regiões
                 fig_oos.add_annotation(
-                    x=_max_v * 0.8, y=_max_v * 0.72,
-                    text="Acima da linha: IA pior | Abaixo: IA melhor",
-                    showarrow=False, font=dict(size=10, color='gray')
+                    x=_axis_max * 0.25, y=_axis_max * 0.75,
+                    text="IA pior<br>(acima da linha)",
+                    showarrow=False, font=dict(size=10, color='#EF4444'),
+                    bgcolor='rgba(255,255,255,0.7)'
                 )
-                fig_oos.update_layout(legend=dict(orientation='h', y=-0.3))
+                fig_oos.add_annotation(
+                    x=_axis_max * 0.75, y=_axis_max * 0.22,
+                    text="IA melhor<br>(abaixo da linha)",
+                    showarrow=False, font=dict(size=10, color='#22C55E'),
+                    bgcolor='rgba(255,255,255,0.7)'
+                )
+                # Nota sobre outliers cortados
+                n_out = int(df_oos_plot['_outlier'].sum())
+                if n_out > 0:
+                    fig_oos.add_annotation(
+                        xref='paper', yref='paper', x=1, y=1,
+                        text=f"{n_out} SKU(s) fora da escala (>{ _axis_max:.0%}) não exibidos",
+                        showarrow=False, font=dict(size=9, color='#94A3B8'),
+                        xanchor='right', yanchor='top'
+                    )
+                fig_oos.update_layout(
+                    legend=dict(
+                        title='', orientation='h',
+                        yanchor='bottom', y=-0.25,
+                        xanchor='center', x=0.5
+                    ),
+                    margin=dict(l=60, r=20, t=50, b=80)
+                )
                 st.plotly_chart(fig_oos, use_container_width=True, key="scatter_oos")
 
             buf_oos = exportar_excel_visual({
