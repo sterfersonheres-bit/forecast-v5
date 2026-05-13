@@ -1097,7 +1097,8 @@ def main():
 
     # ─── Gatilho Out-of-Sample ────────────────────────────────
     if 'rodar_oos' in dir() and rodar_oos:
-        if df_ia_loaded := st.session_state.get('df_ia'):
+        df_ia_loaded = st.session_state.get('df_ia')
+        if df_ia_loaded is not None and len(df_ia_loaded) > 0:
             _base_hash_oos = str(len(df_base)) + str(df_base[col_demanda].sum())                              if 'df_base' in dir() and df_base is not None else "0"
             with st.status("🔬 Calculando WMAPE Out-of-Sample da IA...", expanded=True) as _oos_status:
                 st.write(f"Treinando IA {n_test_oos}× por SKU em dados nunca vistos...")
@@ -1901,7 +1902,7 @@ def main():
             st.info(
                 "O WMAPE Out-of-Sample da IA ainda não foi calculado. "
                 "Clique em **🔬 IA Out-of-Sample** na barra lateral para iniciar. "
-                "Tempo estimado: 15 a 40 minutos para todos os SKUs."
+                "Tempo estimado: **2 a 8 minutos** (75 SKUs selecionados)."
             )
             with st.expander("Por que isso importa?"):
                 st.markdown(
