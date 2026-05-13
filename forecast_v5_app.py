@@ -934,7 +934,7 @@ def main():
         n_test = st.slider("Períodos de backtesting (walk-forward)", 2, 6, 3,
                            help="Quantos períodos finais usar para avaliar cada método")
         peso_ia = st.slider("Peso da IA na previsão combinada (%)", 0, 100, 50,
-                            help="Fallback global — SKUs com OOS calibrado usam peso automático (20%, 50% ou 70%)") / 100
+                            help="Fallback global — SKUs com OOS calibrado usam peso automático (0%, 50% ou 70%)") / 100
         st.divider()
         rodar = st.button("🚀 Rodar Pipeline Completo", type="primary", use_container_width=True)
         if st.button("🗑️ Limpar Cache", use_container_width=True):
@@ -1142,7 +1142,7 @@ def main():
                     elif ratio <= 1.10:
                         _peso_por_sku[_sku_oos] = 0.50   # desempenho similar
                     else:
-                        _peso_por_sku[_sku_oos] = 0.20   # estatístico melhor
+                        _peso_por_sku[_sku_oos] = 0.00   # estatístico melhor — IA zerada
 
                 df_oos_result['peso_ia_automatico'] = df_oos_result['sku'].apply(
                     lambda s: _peso_por_sku.get(s, np.nan)
@@ -1972,7 +1972,7 @@ def main():
             oc2.metric("IA vence estatístico",     n_ia_wins,
                        help="Peso IA = 70% nestes SKUs")
             oc3.metric("Estatístico vence IA",     n_stat_wins,
-                       help="Peso IA = 20% nestes SKUs")
+                       help="Peso IA = 0% nestes SKUs — 100% estatístico")
             oc4.metric("Série curta (excluídos)",  n_sem_dados)
 
             _f_rec = st.selectbox(
@@ -2526,7 +2526,7 @@ def main():
                 "No gráfico IA vs Modelo Estatístico, verifique se a IA captura o padrão histórico (eixo X mostra meses reais).",
                 "A tabela 'Horizonte 3 Meses' exibe M+1/M+2/M+3 em relação ao mês vigente — atualiza automaticamente no virar do mês.",
                 "Use o painel 'IA Out-of-Sample' (botão 🔬 na sidebar) para calibrar o peso ideal por SKU — roda em 2 a 8 min para os 75 SKUs selecionados.",
-                "Após rodar o OOS, o SONAR define automaticamente o peso de cada SKU: 70% se IA vence, 50% se similar, 20% se estatístico vence. Não é necessário ajustar o slider manualmente.",
+                "Após rodar o OOS, o SONAR define automaticamente o peso de cada SKU: 70% se IA vence, 50% se similar, 0% se estatístico vence (IA zerada). Não é necessário ajustar o slider manualmente.",
                 "O slider global continua existindo como fallback para SKUs sem OOS e como override manual quando necessário.",
                 "Rode o pipeline novamente após o OOS para que a Prev. Combinada reflita os pesos calibrados. A sidebar exibe o badge '🎯 Peso automático ativo: N SKUs calibrados'.",
                 "Exporte o horizonte em Excel e use como insumo direto no ciclo N1 do Plano de Demandas.",
@@ -2563,7 +2563,7 @@ def main():
              "Após rodar o **🔬 IA Out-of-Sample**, o SONAR define automaticamente: "
              "**70%** de peso para IA quando ela vence o estatístico, "
              "**50%** quando o desempenho é similar, e "
-             "**20%** quando o estatístico é mais confiável. "
+             "**0%** quando o estatístico é mais confiável (IA zerada — 100% método estatístico). "
              "O slider global continua como fallback para SKUs sem OOS."),
             ("Qual a diferença entre WMAPE in-sample e WMAPE out-of-sample da IA?",
              "O **WMAPE in-sample** é medido nos mesmos dados usados no treino — o modelo já os conhece, então o resultado é otimista. "
@@ -2605,7 +2605,7 @@ def main():
                 "- Holt-Winters exige mínimo de 24 períodos para otimização confiável\n"
                 "- TriM-Heres requer 2 anos de histórico para resultado ideal\n"
                 "- WMAPE in-sample da IA é otimista — use o OOS para calibração real\n"
-                "- O peso automático é definido em 3 faixas fixas (20/50/70%) — não é contínuo\n"
+                "- O peso automático é definido em 3 faixas fixas (0/50/70%) — não é contínuo\n"
                 "- O WMAPE pode ser distorcido por outliers — revise o histórico se suspeitar de dados incorretos\n"
                 "- Eventos disruptivos exigem ajuste manual — o SONAR assume continuidade do padrão histórico"
             )
