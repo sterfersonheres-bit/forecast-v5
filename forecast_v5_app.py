@@ -758,6 +758,99 @@ def calcular_wmape_janela(_df_base_hash, df_base_ref, col_sku_r, col_periodo_r,
 
     return wmape_map, nreg_map, MIN_REG, _periodo_keys
 
+@st.cache_data(show_spinner=False)
+def calcular_wmape_ia_oos(_base_hash, df_base_ref, col_sku_r, col_periodo_r,
+                          col_ano_r, col_demanda_r, df_ia_ref, n_test: int = 2):
+    """
+    Walk-forward out-of-sample da IA: re-treina o modelo para cada período de teste.
+    Retorna dict {sku: wmape_oos} e dict {sku: dict com detalhes}.
+    Cacheado — só recalcula se os dados mudarem.
+    """
+    meses_ord_oos = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,
+                     "jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+
+    _df = df_base_ref.copy()
+    _df["__mn"] = _df[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_oos).fillna(0).astype(int)
+    _df["__an"] = pd.to_numeric(_df[col_ano_r], errors="coerce").fillna(0).astype(int)
+
+    wmape_oos_map  = {}
+    detalhe_map    = {}
+    MIN_PERIODOS   = 14 + n_test  # mínimo para treinar IA + ter dados de teste
+
+    # Filtrar apenas os SKUs da lista alvo (se definida)
+    _skus_alvo = set([
+        90268,91086,90261,90262,91198,90550,91201,91623,91085,91638,
+        91123,91197,91125,91124,90580,91200,91203,91624,90292,91122,
+        90289,90293,90210,90212,90264,90253,91639,91202,90266,90548,
+        90547,90272,42829,90549,90290,90288,37866,90285,90295,90560,
+        90299,90291,451,42774,92047,90287,90511,90512,90274,90208,
+        37865,90282,90298,90392,90283,90296,90284,90286,90263,42773,
+        90258,42839,42780,90297,42775,90391,90254,90273,90259,90270,
+        90267,90894,91199,37864,91121
+    ])
+    # Converter para float pois o df pode ter sku como float
+    _skus_alvo_f = {float(s) for s in _skus_alvo} | {int(s) for s in _skus_alvo}
+    _skus_para_rodar = [s for s in df_ia_ref["sku"].unique()
+                        if s in _skus_alvo_f or int(s) in _skus_alvo]
+
+    for sku in _skus_para_rodar:
+        serie = (_df[_df[col_sku_r] == sku]
+                 .sort_values(["__an","__mn"])[col_demanda_r]
+                 .reset_index(drop=True).astype(float))
+        n = len(serie)
+
+        if n < MIN_PERIODOS:
+            wmape_oos_map[sku] = np.nan
+            detalhe_map[sku]   = {"status": f"Série curta ({n} períodos — mínimo {MIN_PERIODOS})"}
+            continue
+
+        actuals, preds_ia, preds_stat = [], [], []
+        # Buscar melhor método estatístico deste SKU (para comparação lado a lado)
+        _rb = df_ia_ref[df_ia_ref["sku"] == sku]
+        _met = _rb.iloc[0]["melhor_metodo"] if len(_rb) > 0 else "MA-3"
+        _fn  = METODOS[_met]
+
+        for step in range(n_test, 0, -1):
+            treino = serie.iloc[:n - step]
+            # Re-treina IA com o conjunto de treino daquele ponto
+            _modelo_oos = treinar_ia(treino)
+            _pred_ia    = prever_ia(_modelo_oos, treino) if _modelo_oos else None
+
+            # Predição estatística para comparação
+            try:
+                _pred_stat = float(_fn(treino, h=1)[0])
+            except Exception:
+                _pred_stat = float(treino.mean())
+
+            actuals.append(float(serie.iloc[n - step]))
+            preds_ia.append(float(_pred_ia) if _pred_ia is not None else _pred_stat)
+            preds_stat.append(_pred_stat)
+
+        w_oos  = wmape(actuals, preds_ia)
+        w_stat = wmape(actuals, preds_stat)
+
+        wmape_oos_map[sku] = w_oos if pd.notna(w_oos) else np.nan
+        detalhe_map[sku] = {
+            "status":       "OK",
+            "wmape_ia_oos": w_oos,
+            "wmape_stat_oos": w_stat,
+            "n_test":       n_test,
+            "actuals":      actuals,
+            "preds_ia":     preds_ia,
+            "preds_stat":   preds_stat,
+            "met_stat":     _met,
+            "recomendacao": (
+                "✅ IA é mais confiável — aumente o peso no slider"
+                if pd.notna(w_oos) and pd.notna(w_stat) and w_oos < w_stat
+                else "⚠️ Método estatístico é mais confiável — reduza o peso da IA"
+                if pd.notna(w_oos) and pd.notna(w_stat) and w_oos > w_stat * 1.10
+                else "➡️ Desempenho similar — peso 50/50 é adequado"
+            ),
+        }
+
+    return wmape_oos_map, detalhe_map
+
+
 # Manter compatibilidade com código legado
 def exportar_excel(df_bt, df_ia, df_top10):
     abas = {
@@ -841,9 +934,18 @@ def main():
         rodar = st.button("🚀 Rodar Pipeline Completo", type="primary", use_container_width=True)
         if st.button("🗑️ Limpar Cache", use_container_width=True):
             st.cache_data.clear()
-            for k in ['df_backtest', 'df_ia']:
+            for k in ['df_backtest', 'df_ia', 'df_oos']:
                 st.session_state.pop(k, None)
             st.rerun()
+
+        st.divider()
+        st.markdown("**🔬 Análise Avançada**")
+        n_test_oos = st.slider("Períodos de teste out-of-sample", 1, 3, 2,
+                               help="Quantos períodos usar no walk-forward da IA. "
+                                    "Mais períodos = mais preciso, mais lento.")
+        rodar_oos = st.button("🔬 IA Out-of-Sample", use_container_width=True,
+                              help="Avalia a IA em dados que ela nunca viu. "
+                                   "Permite calibrar o peso ideal por SKU.")
 
     # ─── CABEÇALHO ─────────────────────────────────────────────
     st.title("📡 SONAR")
@@ -915,6 +1017,8 @@ def main():
         st.session_state['df_backtest'] = None
     if 'df_ia' not in st.session_state:
         st.session_state['df_ia'] = None
+    if 'df_oos' not in st.session_state:
+        st.session_state['df_oos'] = None   # resultados do out-of-sample
 
     # ─── RODAR PIPELINE ────────────────────────────────────────
     if rodar:
@@ -990,6 +1094,29 @@ def main():
             status.update(label="✅ Pipeline concluído com sucesso!", state="complete")
 
         st.rerun()
+
+    # ─── Gatilho Out-of-Sample ────────────────────────────────
+    if 'rodar_oos' in dir() and rodar_oos:
+        if df_ia_loaded := st.session_state.get('df_ia'):
+            _base_hash_oos = str(len(df_base)) + str(df_base[col_demanda].sum())                              if 'df_base' in dir() and df_base is not None else "0"
+            with st.status("🔬 Calculando WMAPE Out-of-Sample da IA...", expanded=True) as _oos_status:
+                st.write(f"Treinando IA {n_test_oos}× por SKU em dados nunca vistos...")
+                _woos_map, _det_map = calcular_wmape_ia_oos(
+                    _base_hash_oos, df_base, col_sku, col_periodo,
+                    col_ano, col_demanda, df_ia_loaded, n_test=n_test_oos
+                )
+                df_oos_result = df_ia_loaded[['sku','melhor_metodo','wmape_melhor']].copy()
+                df_oos_result['wmape_ia_oos']   = df_oos_result['sku'].map(_woos_map)
+                df_oos_result['wmape_stat_oos']  = df_oos_result['sku'].apply(
+                    lambda s: _det_map.get(s, {}).get('wmape_stat_oos', np.nan))
+                df_oos_result['recomendacao']    = df_oos_result['sku'].apply(
+                    lambda s: _det_map.get(s, {}).get('recomendacao', '—'))
+                df_oos_result['status']          = df_oos_result['sku'].apply(
+                    lambda s: _det_map.get(s, {}).get('status', '—'))
+                st.session_state['df_oos'] = df_oos_result
+                st.session_state['_det_oos'] = _det_map
+                _oos_status.update(label="✅ Out-of-Sample concluído!", state="complete")
+            st.rerun()
 
     df_bt = st.session_state.get('df_backtest')
     df_ia = st.session_state.get('df_ia')
@@ -1764,6 +1891,108 @@ def main():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+        # ── PAINEL IA OUT-OF-SAMPLE ──────────────────────────
+        st.divider()
+        st.markdown("### 🔬 IA Out-of-Sample — Calibração do Peso por SKU")
+
+        df_oos = st.session_state.get('df_oos')
+
+        if df_oos is None:
+            st.info(
+                "O WMAPE Out-of-Sample da IA ainda não foi calculado. "
+                "Clique em **🔬 IA Out-of-Sample** na barra lateral para iniciar. "
+                "Tempo estimado: 15 a 40 minutos para todos os SKUs."
+            )
+            with st.expander("Por que isso importa?"):
+                st.markdown(
+                    "**O problema do in-sample:** o modelo treinou nos mesmos dados que avaliou — resultado otimista.\n\n"
+                    "**O out-of-sample:** re-treina a IA excluindo os períodos de teste, gerando um WMAPE honesto e comparável ao backtesting estatístico.\n\n"
+                    "**Resultado prático:** você saberá exatamente qual peso usar no slider para cada SKU, em vez de um valor global arbitrário."
+                )
+        else:
+            _det_oos = st.session_state.get('_det_oos', {})
+            df_oos_val = df_oos.dropna(subset=['wmape_ia_oos', 'wmape_stat_oos'])
+            n_ia_wins   = int((df_oos_val['wmape_ia_oos'] < df_oos_val['wmape_stat_oos']).sum())
+            n_stat_wins = int(len(df_oos_val) - n_ia_wins)
+            n_sem_dados = int(df_oos['wmape_ia_oos'].isna().sum())
+
+            oc1, oc2, oc3, oc4 = st.columns(4)
+            oc1.metric("SKUs avaliados",           len(df_oos_val))
+            oc2.metric("IA vence estatístico",     n_ia_wins,
+                       help="Aumentar peso da IA nestes SKUs melhora a previsão")
+            oc3.metric("Estatístico vence IA",     n_stat_wins,
+                       help="Reduzir peso da IA nestes SKUs melhora a previsão")
+            oc4.metric("Série curta (excluídos)",  n_sem_dados)
+
+            _f_rec = st.selectbox(
+                "Filtrar por recomendação",
+                options=["Todos", "IA é mais confiável", "Estatístico é mais confiável", "Desempenho similar"],
+                key="oos_filter_rec"
+            )
+            df_oos_show = df_oos_val.copy()
+            if _f_rec == "IA é mais confiável":
+                df_oos_show = df_oos_show[df_oos_show['wmape_ia_oos'] < df_oos_show['wmape_stat_oos']]
+            elif _f_rec == "Estatístico é mais confiável":
+                df_oos_show = df_oos_show[df_oos_show['wmape_ia_oos'] >= df_oos_show['wmape_stat_oos']]
+            elif _f_rec == "Desempenho similar":
+                df_oos_show = df_oos_show[df_oos_show['recomendacao'].str.contains("similar", na=False)]
+
+            df_oos_display = df_oos_show.rename(columns={
+                'sku':            'SKU',
+                'melhor_metodo':  'Melhor Método',
+                'wmape_melhor':   'WMAPE BT',
+                'wmape_ia_oos':   'WMAPE IA (OOS)',
+                'wmape_stat_oos': 'WMAPE Estat. (OOS)',
+                'recomendacao':   'Recomendação de Peso',
+            }).copy()
+            for cp in ['WMAPE BT', 'WMAPE IA (OOS)', 'WMAPE Estat. (OOS)']:
+                if cp in df_oos_display.columns:
+                    df_oos_display[cp] = df_oos_display[cp].apply(
+                        lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—"
+                    )
+            st.dataframe(df_oos_display, use_container_width=True, hide_index=True)
+            st.caption(f"{len(df_oos_show)} SKUs exibidos")
+
+            if len(df_oos_val) > 0:
+                fig_oos = px.scatter(
+                    df_oos_val, x='wmape_stat_oos', y='wmape_ia_oos',
+                    hover_data=['sku', 'melhor_metodo'],
+                    color='recomendacao',
+                    title='WMAPE Out-of-Sample: IA vs Melhor Método Estatístico',
+                    labels={'wmape_stat_oos': 'WMAPE Estatístico (OOS)',
+                            'wmape_ia_oos':   'WMAPE IA (OOS)'},
+                    template='plotly_white', height=380,
+                )
+                _max_v = max(df_oos_val['wmape_stat_oos'].max(),
+                             df_oos_val['wmape_ia_oos'].max())
+                fig_oos.add_shape(type='line', x0=0, y0=0, x1=_max_v, y1=_max_v,
+                                  line=dict(dash='dash', color='gray', width=1))
+                fig_oos.add_annotation(
+                    x=_max_v * 0.8, y=_max_v * 0.72,
+                    text="Acima da linha: IA pior | Abaixo: IA melhor",
+                    showarrow=False, font=dict(size=10, color='gray')
+                )
+                fig_oos.update_layout(legend=dict(orientation='h', y=-0.3))
+                st.plotly_chart(fig_oos, use_container_width=True, key="scatter_oos")
+
+            buf_oos = exportar_excel_visual({
+                'IA_OutofSample': {
+                    'df': df_oos_display.reset_index(drop=True),
+                    'col_wmape': 'WMAPE IA (OOS)',
+                    'col_metodo': 'Melhor Método',
+                    'col_widths': {
+                        'SKU': 14, 'Melhor Método': 18, 'WMAPE BT': 14,
+                        'WMAPE IA (OOS)': 18, 'WMAPE Estat. (OOS)': 20,
+                        'Recomendação de Peso': 35,
+                    },
+                }
+            })
+            st.download_button(
+                "📥 Exportar IA Out-of-Sample (.xlsx)", data=buf_oos,
+                file_name=f"ia_oos_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
         # ── TABELA HORIZONTE 3 MESES ─────────────────────────
         st.divider()
         st.markdown("### 📅 Previsão Horizonte 3 Meses — Todos os SKUs")
@@ -2150,36 +2379,39 @@ def main():
         st.markdown("### 🗂️ O Que Fazer em Cada Aba")
 
         abas_guia = [
-            ("📊 Simulação Retrospectiva", "Diagnóstico e benchmarking de métodos", [
-                "Analise a tabela resumo: veja quantos SKUs cada método consegue abaixo de 35% de WMAPE.",
-                "Compare o ganho vs original: a coluna '▲/▼ Ganho vs Original' mostra se o V5 melhora em relação ao arquivo atual.",
+            ("📊 Simulação Retrospectiva", "Diagnóstico e benchmarking de 9 métodos", [
+                "Analise a tabela resumo: veja quantos SKUs cada método consegue abaixo de 35% de WMAPE (meta do SONAR).",
+                "Compare o ganho vs original: a coluna '▲/▼ Ganho vs Original' mostra se o SONAR melhora em relação ao arquivo atual.",
                 "Use o box plot para entender a dispersão — métodos com mediana baixa mas máximo alto têm SKUs problemáticos específicos.",
-                "Na tabela mensal (parte inferior): selecione o mês fechado mais recente e compare Realizado × Prev. Original × Melhor Prev. V5 por SKU.",
-                "Ação esperada: identificar o método com melhor desempenho global e validar o ganho para justificar a adoção.",
+                "Na tabela mensal (parte inferior): selecione o mês fechado mais recente e compare Realizado × Prev. Original × Melhor Prev. SONAR por SKU. Exporte em Excel com um clique.",
+                "Ação esperada: identificar o método com melhor desempenho global e validar o ganho para justificar a adoção no ciclo de S&OP.",
             ]),
             ("🎯 Seletor de Método", "Qual método usar por SKU", [
                 "Filtre por classificação (ex: Intermitente) para ver todos os SKUs daquele perfil e o melhor método identificado.",
                 "Use o heatmap 'Classificação × Melhor Método' para confirmar se as regras de recomendação estão sendo seguidas.",
-                "Exporte a tabela e use como insumo na revisão do Plano de Demandas.",
+                "Exporte a tabela em Excel e use como insumo na revisão do Plano de Demandas.",
                 "SKUs com WMAPE alto mesmo no melhor método são candidatos a revisão manual do histórico.",
             ]),
             ("🔍 Análise por SKU", "Investigação individual de comportamento", [
-                "Analise o histórico: há tendência? Sazonalidade? Quebra estrutural recente?",
+                "Selecione um SKU e analise o histórico: há tendência? Sazonalidade? Quebra estrutural recente?",
                 "O gráfico de ACF mostra correlação com períodos passados. Barras além das linhas pontilhadas = memória na série.",
-                "Compare as 9 previsões lado a lado: grande divergência entre elas indica demanda imprevisível.",
+                "Compare as 9 previsões lado a lado no gráfico — grande divergência entre elas indica demanda imprevisível.",
                 "Para SKUs com ACF positivo no lag 12, aplique TriM-Heres. Para séries com quebra recente, revise o histórico base.",
             ]),
-            ("🤖 IA + Previsão", "Previsão para os próximos 3 meses (M+1/M+2/M+3)", [
-                "Ajuste o slider de peso: mais IA para séries longas e estáveis; menos IA para séries curtas ou erráticas.",
-                "No gráfico IA vs Modelo Estatístico, verifique se a IA está capturando o padrão histórico.",
-                "A tabela 'Horizonte 3 Meses' exibe M+1/M+2/M+3 em relação ao mês vigente — atualiza automaticamente a cada mês.",
+            ("🤖 IA + Previsão", "Previsão M+1/M+2/M+3 e calibração do peso da IA", [
+                "Ajuste o slider de peso no sidebar: mais IA para séries longas e estáveis; menos IA para séries curtas ou erráticas.",
+                "No gráfico IA vs Modelo Estatístico, verifique se a IA captura o padrão histórico (eixo X mostra meses reais).",
+                "A tabela 'Horizonte 3 Meses' exibe M+1/M+2/M+3 em relação ao mês vigente — atualiza automaticamente no virar do mês.",
+                "Use o painel 'IA Out-of-Sample' (botão 🔬 na sidebar) para saber o peso ideal por SKU — roda em 2 a 8 min para os 75 SKUs selecionados.",
+                "O resultado Out-of-Sample mostra: IA vence estatístico (aumentar peso) ou estatístico vence IA (reduzir peso). Exporte o gráfico de dispersão para documentar a calibração.",
                 "Exporte o horizonte em Excel e use como insumo direto no ciclo N1 do Plano de Demandas.",
             ]),
             ("📋 Top 10 Piores WMAPE", "Priorização e ação nos SKUs críticos", [
-                "Use o seletor de janela (3/6/12 meses) para distinguir problemas pontuais de problemas estruturais.",
-                "Para cada SKU, leia o diagnóstico da IA e avalie a sugestão de método ou ação corretiva.",
-                "Mini-gráfico: identifique outlier, quebra ou sazonalidade não capturada.",
-                "Defina uma ação por SKU — revisão do histórico, ajuste manual do plano, ou uso do método sugerido.",
+                "Dois painéis lado a lado: 12 meses (problemas estruturais) e 6 meses (problemas recentes). Compare os dois rankings simultaneamente.",
+                "Se um SKU aparece nos dois painéis = problema estrutural. Só no de 6 meses = evento pontual recente.",
+                "SKUs com menos de 3 registros na janela são automaticamente excluídos do ranking — evita distorção por série vazia.",
+                "Para cada SKU, leia o diagnóstico da IA e avalie a sugestão: revisar histórico, trocar método ou ajustar plano.",
+                "Mini-gráfico com eixo em meses reais: identifique outlier, quebra ou sazonalidade não capturada.",
                 "Exporte o relatório em Excel para documentar as ações no ciclo de S&OP.",
             ]),
         ]
@@ -2202,26 +2434,31 @@ def main():
              "Sempre analise a **mediana** do WMAPE, que é mais robusta a outliers. "
              "WMAPE mediana de 35% significa que metade dos SKUs erra menos que 35%."),
             ("Quando confiar mais na IA do que no modelo estatístico?",
-             "Prefira a IA quando: (1) a série tem mais de 18 períodos, (2) o WMAPE in-sample da IA é menor que o do melhor método estatístico, "
-             "e (3) a demanda tem padrões não-lineares. Use menos IA quando: a série é curta, a demanda é intermitente, ou o WMAPE in-sample é alto."),
+             "Use o painel **IA Out-of-Sample** (botão 🔬 na sidebar) para responder isso com precisão por SKU. "
+             "Como regra geral: prefira mais IA quando a série tem mais de 18 períodos e o padrão é não-linear. "
+             "Prefira menos IA quando a série é curta, intermitente, ou o WMAPE out-of-sample da IA for maior que o estatístico."),
+            ("Qual a diferença entre WMAPE in-sample e WMAPE out-of-sample da IA?",
+             "O **WMAPE in-sample** é medido nos mesmos dados usados no treino — o modelo já os conhece, então o resultado é otimista. "
+             "O **WMAPE out-of-sample** re-treina a IA excluindo os períodos de teste — resultado honesto e comparável ao backtesting estatístico. "
+             "Para calibrar o slider de peso, sempre use o out-of-sample."),
             ("O que fazer quando nenhum método tem WMAPE abaixo de 60%?",
              "Ações recomendadas: (1) revisar o histórico e remover outliers, "
-             "(2) verificar se há quebra estrutural (novo projeto, novo cliente), "
+             "(2) verificar se há quebra estrutural (novo projeto, novo cliente, troca de empreiteira), "
              "(3) adotar estoque de segurança maior em vez de depender da previsão, "
              "(4) classificar como demanda errática e planejar por disponibilidade mínima."),
-            ("Qual a diferença entre WMAPE de backtesting e WMAPE in-sample da IA?",
-             "O **WMAPE de backtesting** é medido em dados que o modelo nunca viu (walk-forward) — é o mais confiável. "
-             "O **WMAPE in-sample da IA** é medido nos dados de treino — tende a ser otimista. "
-             "Para decisão, sempre prefira o WMAPE de backtesting."),
             ("Como usar o horizonte de 3 meses no ciclo de planejamento?",
              "Exporte a tabela no início de cada ciclo N1. Os valores de M+1 são os mais confiáveis. "
              "M+2 e M+3 têm incerteza crescente — use como referência mas aplique julgamento sobre eventos conhecidos. "
-             "Ao fechar um mês, o horizonte avança automaticamente."),
-            ("Por que a janela de 3 meses do Top 10 pode mostrar resultados diferentes da janela de 12 meses?",
-             "A janela de 3 meses avalia o WMAPE apenas nos últimos 3 meses disponíveis na base. "
-             "Se um SKU teve um evento atípico recente (ex.: entrega antecipada, parada de obra), "
-             "o WMAPE de 3 meses será alto mas o de 12 meses pode ser baixo. "
-             "Use essa comparação para distinguir problemas pontuais de problemas estruturais."),
+             "O horizonte avança automaticamente no virar do mês — sem necessidade de reconfigurar."),
+            ("Por que os dois painéis do Top 10 (6 e 12 meses) mostram rankings diferentes?",
+             "A janela de 6 meses avalia o WMAPE apenas nos últimos 6 meses disponíveis na base, capturando problemas recentes. "
+             "A de 12 meses captura o comportamento anual completo. "
+             "Se um SKU está no Top 10 de 6 meses mas não no de 12, o problema é pontual (evento recente). "
+             "Se aparece nos dois, é estrutural e exige ação mais profunda."),
+            ("O que significa 'SKU excluído' no Top 10?",
+             "SKUs com menos de 3 registros na janela selecionada são automaticamente excluídos do ranking. "
+             "Isso evita que itens com histórico quase vazio (ex: produto novo com 1 ou 2 meses de dado) "
+             "dominem o Top 10 com WMAPEs distorcidos. Eles continuam visíveis na Análise por SKU individual."),
         ]
 
         for pergunta, resposta in faqs:
@@ -2239,18 +2476,20 @@ def main():
                 "- SKUs com menos de 14 períodos não têm modelo de IA\n"
                 "- Holt-Winters exige mínimo de 24 períodos para otimização confiável\n"
                 "- TriM-Heres requer 2 anos de histórico para resultado ideal\n"
+                "- WMAPE in-sample da IA é otimista — use o Out-of-Sample para calibrar o peso\n"
                 "- O WMAPE pode ser distorcido por outliers — revise o histórico se suspeitar de dados incorretos\n"
-                "- Eventos disruptivos exigem ajuste manual — a ferramenta assume continuidade do padrão histórico"
+                "- Eventos disruptivos exigem ajuste manual — o SONAR assume continuidade do padrão histórico"
             )
         with col_lim2:
             st.success(
                 "**Boas práticas recomendadas:**\n\n"
                 "- Mantenha a base histórica limpa e atualizada mensalmente\n"
                 "- Sempre rode o pipeline com pelo menos 12 meses de histórico\n"
+                "- Rode o IA Out-of-Sample mensalmente nos SKUs críticos para calibrar o peso\n"
                 "- Use o FVA para medir se a intervenção manual agrega valor\n"
-                "- Documente ajustes manuais feitos sobre a previsão do pipeline\n"
-                "- Revise o Top 10 mensalmente e defina ação para cada SKU crítico\n"
-                "- Combine a previsão do pipeline com o conhecimento de mercado da equipe comercial"
+                "- Compare os painéis de 6 e 12 meses no Top 10 para classificar problemas\n"
+                "- Documente ajustes manuais feitos sobre a previsão do SONAR\n"
+                "- Combine a previsão do SONAR com o conhecimento de mercado da equipe comercial"
             )
 
 # ══════════════════════════════════════════════════════════════
