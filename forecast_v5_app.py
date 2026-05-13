@@ -926,15 +926,20 @@ def main():
 
         st.divider()
         st.markdown("**⚙️ Configurações**")
+        _n_auto_side = len(st.session_state.get('peso_por_sku', {}))
+        if _n_auto_side > 0:
+            st.caption(f"🎯 Peso automático ativo: {_n_auto_side} SKUs calibrados pelo OOS")
+        else:
+            st.caption("Slider global aplicado a todos os SKUs")
         n_test = st.slider("Períodos de backtesting (walk-forward)", 2, 6, 3,
                            help="Quantos períodos finais usar para avaliar cada método")
         peso_ia = st.slider("Peso da IA na previsão combinada (%)", 0, 100, 50,
-                            help="O restante é dado ao melhor método estatístico") / 100
+                            help="Fallback global — SKUs com OOS calibrado usam peso automático (20%, 50% ou 70%)") / 100
         st.divider()
         rodar = st.button("🚀 Rodar Pipeline Completo", type="primary", use_container_width=True)
         if st.button("🗑️ Limpar Cache", use_container_width=True):
             st.cache_data.clear()
-            for k in ['df_backtest', 'df_ia', 'df_oos']:
+            for k in ['df_backtest', 'df_ia', 'df_oos', 'peso_por_sku', '_det_oos']:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -1019,6 +1024,8 @@ def main():
         st.session_state['df_ia'] = None
     if 'df_oos' not in st.session_state:
         st.session_state['df_oos'] = None   # resultados do out-of-sample
+    if 'peso_por_sku' not in st.session_state:
+        st.session_state['peso_por_sku'] = {}  # pesos automáticos por SKU (do OOS)
 
     # ─── RODAR PIPELINE ────────────────────────────────────────
     if rodar:
@@ -1052,13 +1059,18 @@ def main():
                 fn_melhor = METODOS[melhor]
                 pred_stat = fn_melhor(serie, h=1)[0]
 
-                # Previsão combinada
+                # Previsão combinada — usa peso automático do OOS se disponível
+                _pesos_oos = st.session_state.get('peso_por_sku', {})
+                _peso_sku  = _pesos_oos.get(sku, _pesos_oos.get(float(sku), None))
+                _peso_efetivo = _peso_sku if _peso_sku is not None else peso_ia
+
                 if pred_ia is not None:
-                    pred_comb = peso_ia * pred_ia + (1 - peso_ia) * pred_stat
+                    pred_comb = _peso_efetivo * pred_ia + (1 - _peso_efetivo) * pred_stat
                     if model_ia:
                         wmape_ia, _, _ = wmape_ia_insample(model_ia, serie)
                 else:
                     pred_comb = pred_stat
+                    _peso_efetivo = 0.0
 
                 # Características da demanda
                 classe  = classificar_demanda(serie)
@@ -1079,6 +1091,7 @@ def main():
                     'melhor_metodo':         melhor,
                     'wmape_melhor':          melhor_w,
                     'wmape_ia_insample':     wmape_ia,
+                    'peso_ia_usado':         round(_peso_efetivo * 100, 0),  # % usado na combinação
                 }
                 if wmape_original:
                     row_dict['wmape_original'] = wmape_original.get(sku, np.nan)
@@ -1114,8 +1127,33 @@ def main():
                     lambda s: _det_map.get(s, {}).get('recomendacao', '—'))
                 df_oos_result['status']          = df_oos_result['sku'].apply(
                     lambda s: _det_map.get(s, {}).get('status', '—'))
-                st.session_state['df_oos'] = df_oos_result
-                st.session_state['_det_oos'] = _det_map
+                # Calcular peso automático por SKU baseado no OOS
+                _peso_por_sku = {}
+                for _sku_oos, _det in _det_map.items():
+                    if _det.get('status') != 'OK':
+                        continue  # série curta — vai usar o slider global
+                    _w_ia   = _det.get('wmape_ia_oos',  np.nan)
+                    _w_stat = _det.get('wmape_stat_oos', np.nan)
+                    if pd.isna(_w_ia) or pd.isna(_w_stat) or _w_stat == 0:
+                        continue
+                    ratio = _w_ia / _w_stat
+                    if ratio < 0.90:
+                        _peso_por_sku[_sku_oos] = 0.70   # IA claramente melhor
+                    elif ratio <= 1.10:
+                        _peso_por_sku[_sku_oos] = 0.50   # desempenho similar
+                    else:
+                        _peso_por_sku[_sku_oos] = 0.20   # estatístico melhor
+
+                df_oos_result['peso_ia_automatico'] = df_oos_result['sku'].apply(
+                    lambda s: _peso_por_sku.get(s, np.nan)
+                )
+                df_oos_result['peso_ia_pct'] = df_oos_result['peso_ia_automatico'].apply(
+                    lambda x: f"{x*100:.0f}%" if pd.notna(x) else "slider global"
+                )
+
+                st.session_state['df_oos']       = df_oos_result
+                st.session_state['_det_oos']      = _det_map
+                st.session_state['peso_por_sku']  = _peso_por_sku   # ← chave principal
                 _oos_status.update(label="✅ Out-of-Sample concluído!", state="complete")
             st.rerun()
 
@@ -1917,12 +1955,24 @@ def main():
             n_stat_wins = int(len(df_oos_val) - n_ia_wins)
             n_sem_dados = int(df_oos['wmape_ia_oos'].isna().sum())
 
+            # Badge de status do peso automático
+            _pesos_ativos = st.session_state.get('peso_por_sku', {})
+            _n_auto = len(_pesos_ativos)
+            if _n_auto > 0:
+                st.success(
+                    f"✅ **Peso automático ativo** para **{_n_auto} SKUs**. "
+                    f"A Prev. Combinada já está usando os pesos calibrados pelo OOS. "
+                    f"O slider global é usado apenas como fallback para os demais SKUs."
+                )
+            else:
+                st.info("ℹ️ Pesos automáticos ainda não aplicados — rode o pipeline novamente para atualizar a Prev. Combinada com os pesos do OOS.")
+
             oc1, oc2, oc3, oc4 = st.columns(4)
             oc1.metric("SKUs avaliados",           len(df_oos_val))
             oc2.metric("IA vence estatístico",     n_ia_wins,
-                       help="Aumentar peso da IA nestes SKUs melhora a previsão")
+                       help="Peso IA = 70% nestes SKUs")
             oc3.metric("Estatístico vence IA",     n_stat_wins,
-                       help="Reduzir peso da IA nestes SKUs melhora a previsão")
+                       help="Peso IA = 20% nestes SKUs")
             oc4.metric("Série curta (excluídos)",  n_sem_dados)
 
             _f_rec = st.selectbox(
@@ -1939,12 +1989,13 @@ def main():
                 df_oos_show = df_oos_show[df_oos_show['recomendacao'].str.contains("similar", na=False)]
 
             df_oos_display = df_oos_show.rename(columns={
-                'sku':            'SKU',
-                'melhor_metodo':  'Melhor Método',
-                'wmape_melhor':   'WMAPE BT',
-                'wmape_ia_oos':   'WMAPE IA (OOS)',
-                'wmape_stat_oos': 'WMAPE Estat. (OOS)',
-                'recomendacao':   'Recomendação de Peso',
+                'sku':                   'SKU',
+                'melhor_metodo':         'Melhor Método',
+                'wmape_melhor':          'WMAPE BT',
+                'wmape_ia_oos':          'WMAPE IA (OOS)',
+                'wmape_stat_oos':        'WMAPE Estat. (OOS)',
+                'recomendacao':          'Recomendação',
+                'peso_ia_pct':           'Peso IA Automático',
             }).copy()
             for cp in ['WMAPE BT', 'WMAPE IA (OOS)', 'WMAPE Estat. (OOS)']:
                 if cp in df_oos_display.columns:
@@ -2137,8 +2188,11 @@ def main():
                     pred_stat_step = preds_stat_h[step] if step < len(preds_stat_h) else preds_stat_h[-1]
                     pred_ia_step   = preds_ia_h[step] if (preds_ia_h[step] is not None) else pred_stat_step
 
-                    # Peso da IA (do slider)
-                    pred_comb_step = peso_ia * pred_ia_step + (1 - peso_ia) * pred_stat_step
+                    # Peso da IA — automático por SKU (OOS) ou slider global (fallback)
+                    _pesos_oos_h  = st.session_state.get('peso_por_sku', {})
+                    _peso_h       = _pesos_oos_h.get(sku, _pesos_oos_h.get(float(sku), None))
+                    _peso_ef_h    = _peso_h if _peso_h is not None else peso_ia
+                    pred_comb_step = _peso_ef_h * pred_ia_step + (1 - _peso_ef_h) * pred_stat_step
                     row_h[f'Prev {lbl_h}'] = round(max(0.0, pred_comb_step), 1)
 
                 row_h['Método Base'] = melhor_h
@@ -2468,12 +2522,13 @@ def main():
                 "Compare as 9 previsões lado a lado no gráfico — grande divergência entre elas indica demanda imprevisível.",
                 "Para SKUs com ACF positivo no lag 12, aplique TriM-Heres. Para séries com quebra recente, revise o histórico base.",
             ]),
-            ("🤖 IA + Previsão", "Previsão M+1/M+2/M+3 e calibração do peso da IA", [
-                "Ajuste o slider de peso no sidebar: mais IA para séries longas e estáveis; menos IA para séries curtas ou erráticas.",
+            ("🤖 IA + Previsão", "Previsão M+1/M+2/M+3 e calibração automática do peso da IA", [
                 "No gráfico IA vs Modelo Estatístico, verifique se a IA captura o padrão histórico (eixo X mostra meses reais).",
                 "A tabela 'Horizonte 3 Meses' exibe M+1/M+2/M+3 em relação ao mês vigente — atualiza automaticamente no virar do mês.",
-                "Use o painel 'IA Out-of-Sample' (botão 🔬 na sidebar) para saber o peso ideal por SKU — roda em 2 a 8 min para os 75 SKUs selecionados.",
-                "O resultado Out-of-Sample mostra: IA vence estatístico (aumentar peso) ou estatístico vence IA (reduzir peso). Exporte o gráfico de dispersão para documentar a calibração.",
+                "Use o painel 'IA Out-of-Sample' (botão 🔬 na sidebar) para calibrar o peso ideal por SKU — roda em 2 a 8 min para os 75 SKUs selecionados.",
+                "Após rodar o OOS, o SONAR define automaticamente o peso de cada SKU: 70% se IA vence, 50% se similar, 20% se estatístico vence. Não é necessário ajustar o slider manualmente.",
+                "O slider global continua existindo como fallback para SKUs sem OOS e como override manual quando necessário.",
+                "Rode o pipeline novamente após o OOS para que a Prev. Combinada reflita os pesos calibrados. A sidebar exibe o badge '🎯 Peso automático ativo: N SKUs calibrados'.",
                 "Exporte o horizonte em Excel e use como insumo direto no ciclo N1 do Plano de Demandas.",
             ]),
             ("📋 Top 10 Piores WMAPE", "Priorização e ação nos SKUs críticos", [
@@ -2504,9 +2559,12 @@ def main():
              "Sempre analise a **mediana** do WMAPE, que é mais robusta a outliers. "
              "WMAPE mediana de 35% significa que metade dos SKUs erra menos que 35%."),
             ("Quando confiar mais na IA do que no modelo estatístico?",
-             "Use o painel **IA Out-of-Sample** (botão 🔬 na sidebar) para responder isso com precisão por SKU. "
-             "Como regra geral: prefira mais IA quando a série tem mais de 18 períodos e o padrão é não-linear. "
-             "Prefira menos IA quando a série é curta, intermitente, ou o WMAPE out-of-sample da IA for maior que o estatístico."),
+             "Com o **peso automático por SKU**, você não precisa mais decidir manualmente. "
+             "Após rodar o **🔬 IA Out-of-Sample**, o SONAR define automaticamente: "
+             "**70%** de peso para IA quando ela vence o estatístico, "
+             "**50%** quando o desempenho é similar, e "
+             "**20%** quando o estatístico é mais confiável. "
+             "O slider global continua como fallback para SKUs sem OOS."),
             ("Qual a diferença entre WMAPE in-sample e WMAPE out-of-sample da IA?",
              "O **WMAPE in-sample** é medido nos mesmos dados usados no treino — o modelo já os conhece, então o resultado é otimista. "
              "O **WMAPE out-of-sample** re-treina a IA excluindo os períodos de teste — resultado honesto e comparável ao backtesting estatístico. "
@@ -2546,7 +2604,8 @@ def main():
                 "- SKUs com menos de 14 períodos não têm modelo de IA\n"
                 "- Holt-Winters exige mínimo de 24 períodos para otimização confiável\n"
                 "- TriM-Heres requer 2 anos de histórico para resultado ideal\n"
-                "- WMAPE in-sample da IA é otimista — use o Out-of-Sample para calibrar o peso\n"
+                "- WMAPE in-sample da IA é otimista — use o OOS para calibração real\n"
+                "- O peso automático é definido em 3 faixas fixas (20/50/70%) — não é contínuo\n"
                 "- O WMAPE pode ser distorcido por outliers — revise o histórico se suspeitar de dados incorretos\n"
                 "- Eventos disruptivos exigem ajuste manual — o SONAR assume continuidade do padrão histórico"
             )
@@ -2555,7 +2614,8 @@ def main():
                 "**Boas práticas recomendadas:**\n\n"
                 "- Mantenha a base histórica limpa e atualizada mensalmente\n"
                 "- Sempre rode o pipeline com pelo menos 12 meses de histórico\n"
-                "- Rode o IA Out-of-Sample mensalmente nos SKUs críticos para calibrar o peso\n"
+                "- Rode o OOS mensalmente nos SKUs críticos → pipeline novamente para aplicar os pesos\n"
+                "- Verifique o badge na sidebar: '🎯 Peso automático ativo: N SKUs calibrados'\n"
                 "- Use o FVA para medir se a intervenção manual agrega valor\n"
                 "- Compare os painéis de 6 e 12 meses no Top 10 para classificar problemas\n"
                 "- Documente ajustes manuais feitos sobre a previsão do SONAR\n"
