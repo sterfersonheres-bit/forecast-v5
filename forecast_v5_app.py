@@ -1045,6 +1045,9 @@ def main():
 
         wmape_cols = [c for c in df_bt.columns if c.startswith('wmape_')]
         metodos_nomes = [c.replace('wmape_', '') for c in wmape_cols]
+        if not wmape_cols:
+            st.warning("⚠️ Dados de backtesting incompletos. Clique em **Limpar Cache** e rode o pipeline novamente.")
+            st.stop()
         wmape_orig_por_sku = wmape_original or {}
         med_wmape_orig = np.nanmedian(list(wmape_orig_por_sku.values())) if wmape_orig_por_sku else np.nan
 
@@ -1078,12 +1081,15 @@ def main():
                 for v in df_bt[col].dropna():
                     melt_data.append({'Método': nome, 'WMAPE (%)': v * 100})
             df_melt = pd.DataFrame(melt_data)
-            ordem = df_melt.groupby('Método')['WMAPE (%)'].median().sort_values().index.tolist()
-            fig_box = px.box(df_melt, x='Método', y='WMAPE (%)', title='Distribuição do WMAPE por Método',
-                             color='Método', category_orders={'Método': ordem}, template='plotly_white', points='outliers')
-            fig_box.update_layout(showlegend=False, xaxis_tickangle=-30)
-            fig_box.add_hline(y=20, line_dash='dash', line_color='green', annotation_text='Meta 20%', annotation_position='right')
-            st.plotly_chart(fig_box, use_container_width=True)
+            if not df_melt.empty and 'Método' in df_melt.columns:
+                ordem = df_melt.groupby('Método')['WMAPE (%)'].median().sort_values().index.tolist()
+                fig_box = px.box(df_melt, x='Método', y='WMAPE (%)', title='Distribuição do WMAPE por Método',
+                                 color='Método', category_orders={'Método': ordem}, template='plotly_white', points='outliers')
+                fig_box.update_layout(showlegend=False, xaxis_tickangle=-30)
+                fig_box.add_hline(y=20, line_dash='dash', line_color='green', annotation_text='Meta 20%', annotation_position='right')
+                st.plotly_chart(fig_box, use_container_width=True)
+            else:
+                st.info("Rode o pipeline para visualizar a distribuição do WMAPE.")
 
         with col_b:
             counts = df_bt['melhor_metodo'].value_counts().reset_index()
