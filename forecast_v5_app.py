@@ -1,26 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-╔══════════════════════════════════════════════════════════════╗
-║           FORECAST INTELIGENTE V5 — Dashboard Streamlit      ║
-║    IA + Estatística | Backtesting | Análise por SKU          ║
-╚══════════════════════════════════════════════════════════════╝
-
-INSTALAÇÃO:
-    pip install streamlit pandas numpy plotly scipy scikit-learn
-    pip install statsmodels openpyxl xlsxwriter
-
-EXECUÇÃO:
-    streamlit run forecast_v5_app.py
-
-ESTRUTURA ESPERADA DO EXCEL (abas):
-    Base_Limpa       → Histórico de demanda (SKU | Período | Demanda)
-    Estatistica_SKU  → Estatísticas por SKU
-    Previsao_Modelo  → Previsões dos modelos estatísticos
-    Avaliacao_Modelo → Melhores previsões com WMAPE
-    Avaliacao_SKU    → Avaliação por SKU
-"""
-
 import os, glob, warnings, io, datetime, unicodedata
 import numpy as np
 import pandas as pd
@@ -38,34 +17,18 @@ try:
     HAS_STATSMODELS = True
 except ImportError:
     HAS_STATSMODELS = False
-    st.sidebar.warning("⚠️ statsmodels não instalado. Alguns métodos serão desabilitados.\npip install statsmodels")
 
-# ══════════════════════════════════════════════════════════════
-# CONFIGURAÇÃO DA PÁGINA
-# ══════════════════════════════════════════════════════════════
+st.set_page_config(page_title="SONAR — Forecast de Demanda", page_icon="📡", layout="wide", initial_sidebar_state="expanded")
 
-st.set_page_config(
-    page_title="SONAR — Forecast de Demanda",
-    page_icon="📡",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# CSS customizado
 st.markdown("""
 <style>
-    .metric-card {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        border: 1px solid #0f3460;
-        border-radius: 12px;
-        padding: 16px;
-        color: white;
-    }
+    .metric-card { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); border: 1px solid #0f3460; border-radius: 12px; padding: 16px; color: white; }
     .badge-green { background:#00b894; color:white; padding:2px 8px; border-radius:12px; font-size:12px; }
     .badge-red   { background:#d63031; color:white; padding:2px 8px; border-radius:12px; font-size:12px; }
     .badge-yellow{ background:#fdcb6e; color:#2d3436; padding:2px 8px; border-radius:12px; font-size:12px; }
     .stTabs [data-baseweb="tab"] { font-size:15px; font-weight:600; }
     div[data-testid="metric-container"] { background:#f8f9fa; border-radius:10px; padding:10px; border:1px solid #e9ecef; }
+    .seg-flag { background: linear-gradient(90deg,#0D9488,#14B8A6); color:white; border-radius:8px; padding:6px 12px; font-size:12px; font-weight:600; margin:4px 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -82,7 +45,6 @@ def normalizar(texto):
     return texto.replace(" ", "").replace("_", "").replace("-", "")
 
 def encontrar_coluna(df, *palavras):
-    """Busca coluna por palavras-chave normalizadas"""
     cols_norm = {normalizar(c): c for c in df.columns}
     for palavra in palavras:
         pn = normalizar(palavra)
@@ -92,7 +54,6 @@ def encontrar_coluna(df, *palavras):
     return None
 
 def wmape(actual, forecast):
-    """WMAPE = Σ|real - prev| / Σ|real|"""
     a = np.array(actual, dtype=float)
     f = np.array(forecast, dtype=float)
     mask = a > 0
@@ -101,15 +62,10 @@ def wmape(actual, forecast):
     return np.sum(np.abs(a[mask] - f[mask])) / np.sum(a[mask])
 
 def cor_wmape(val):
-    """Retorna cor HTML baseada no WMAPE"""
-    if pd.isna(val):
-        return "#95a5a6"
-    if val < 0.20:
-        return "#00b894"
-    if val < 0.40:
-        return "#f9ca24"
-    if val < 0.60:
-        return "#e17055"
+    if pd.isna(val): return "#95a5a6"
+    if val < 0.20:   return "#00b894"
+    if val < 0.40:   return "#f9ca24"
+    if val < 0.60:   return "#e17055"
     return "#d63031"
 
 # ══════════════════════════════════════════════════════════════
@@ -118,7 +74,6 @@ def cor_wmape(val):
 
 def carregar_excel(arquivo) -> dict:
     try:
-        # Aceita tanto caminho de arquivo quanto objeto de upload do Streamlit
         xls = pd.ExcelFile(arquivo)
         abas = xls.sheet_names
 
@@ -135,6 +90,7 @@ def carregar_excel(arquivo) -> dict:
 
         return {
             'base':           get_aba('baselimpa', 'base', 'historico', 'hist'),
+            'base_dados':     get_aba('basedados', 'base_dados'),          # ← NOVO: carrega Base_Dados
             'estatistica':    get_aba('estatisticasku', 'estatistica', 'estat'),
             'previsao':       get_aba('previsaomodelo', 'previsao', 'modelo'),
             'avaliacao':      get_aba('avaliacaomodelo', 'avaliacao', 'aval'),
@@ -189,16 +145,12 @@ def forecast_hw(serie, h=1):
     if not HAS_STATSMODELS or len(serie) < sp * 2:
         return forecast_holt(serie, h)
     try:
-        m = ExponentialSmoothing(
-            serie.astype(float).values,
-            trend='add', seasonal='add', seasonal_periods=sp
-        ).fit(optimized=True, disp=False)
+        m = ExponentialSmoothing(serie.astype(float).values, trend='add', seasonal='add', seasonal_periods=sp).fit(optimized=True, disp=False)
         return _safe_positive(m.forecast(h).tolist())
     except:
         return forecast_holt(serie, h)
 
 def forecast_croston(serie, h=1):
-    """Croston para demanda intermitente"""
     d = serie.dropna().values.astype(float)
     if len(d) == 0 or d.max() == 0:
         return [0.0] * h
@@ -217,15 +169,11 @@ def forecast_croston(serie, h=1):
     return [result] * h
 
 def forecast_trim_heres(serie, h=1):
-    """TriM-Heres: média do mesmo trimestre (M-2,M-1,M) dos últimos 2 anos.
-    Captura sazonalidade sem exigir série longa. Fallback ponderado se < 6 obs."""
     s = serie.dropna().reset_index(drop=True)
     n = len(s)
     resultados = []
     for step in range(1, h + 1):
-        n_pred = n + step - 1  # índice da posição sendo prevista
-        # Mesmo trimestre ano -1: posições n_pred-14, n_pred-13, n_pred-12
-        # Mesmo trimestre ano -2: posições n_pred-26, n_pred-25, n_pred-24
+        n_pred = n + step - 1
         idx_y1 = [n_pred - 14, n_pred - 13, n_pred - 12]
         idx_y2 = [n_pred - 26, n_pred - 25, n_pred - 24]
         vals = []
@@ -246,40 +194,32 @@ def forecast_trim_heres(serie, h=1):
     return resultados
 
 METODOS = {
-    'Naive':       forecast_naive,
-    'MA-3':        forecast_ma3,
-    'MA-6':        forecast_ma6,
-    'WMA-3':       forecast_wma,
-    'SES':         forecast_ses,
-    'Holt':        forecast_holt,
-    'Holt-Winters': forecast_hw,
-    'Croston':     forecast_croston,
-    'TriM-Heres':  forecast_trim_heres,
+    'Naive': forecast_naive, 'MA-3': forecast_ma3, 'MA-6': forecast_ma6,
+    'WMA-3': forecast_wma, 'SES': forecast_ses, 'Holt': forecast_holt,
+    'Holt-Winters': forecast_hw, 'Croston': forecast_croston, 'TriM-Heres': forecast_trim_heres,
 }
 
 METODOS_DESC = {
-    'Naive':        'Usa o último valor observado. Boa referência baseline.',
-    'MA-3':         'Média simples dos 3 últimos períodos.',
-    'MA-6':         'Média simples dos 6 últimos períodos. Suaviza mais.',
-    'WMA-3':        'Média ponderada (maior peso nos períodos recentes).',
-    'SES':          'Suavização Exponencial Simples. Alfa otimizado.',
-    'Holt':         'Holt duplo. Captura tendência linear.',
+    'Naive': 'Usa o último valor observado. Boa referência baseline.',
+    'MA-3': 'Média simples dos 3 últimos períodos.',
+    'MA-6': 'Média simples dos 6 últimos períodos. Suaviza mais.',
+    'WMA-3': 'Média ponderada (maior peso nos períodos recentes).',
+    'SES': 'Suavização Exponencial Simples. Alfa otimizado.',
+    'Holt': 'Holt duplo. Captura tendência linear.',
     'Holt-Winters': 'Triple ES. Captura tendência e sazonalidade anual.',
-    'Croston':      'Ideal para demanda intermitente com muitos zeros.',
-    'TriM-Heres':   'Média do mesmo trimestre dos 2 últimos anos. Captura sazonalidade.',
+    'Croston': 'Ideal para demanda intermitente com muitos zeros.',
+    'TriM-Heres': 'Média do mesmo trimestre dos 2 últimos anos. Captura sazonalidade.',
 }
 
 # ══════════════════════════════════════════════════════════════
-# BACKTESTING — WALK-FORWARD VALIDATION
+# BACKTESTING
 # ══════════════════════════════════════════════════════════════
 
 def backtest_sku(serie: pd.Series, fn, n_test: int = 3):
-    """Walk-forward validation para um SKU e um método"""
     s = serie.dropna().reset_index(drop=True)
     n = len(s)
     if n < n_test + 4:
         return np.nan, [], []
-
     actuals, preds = [], []
     for i in range(n_test, 0, -1):
         train = s.iloc[:n - i]
@@ -289,94 +229,67 @@ def backtest_sku(serie: pd.Series, fn, n_test: int = 3):
             pred = float(train.mean())
         actuals.append(float(s.iloc[n - i]))
         preds.append(max(0.0, pred))
-
     return wmape(actuals, preds), actuals, preds
-
-
-@st.cache_data(show_spinner=False)
-def rodar_backtesting_cached(df_hash: str, n_test: int):
-    """Versão cacheada — o hash é passado para invalidar cache se dados mudarem"""
-    # Placeholder: real computation happens in rodar_backtesting()
-    pass
-
 
 def rodar_backtesting(df_base, col_sku, col_demanda, n_test=3):
     skus = df_base[col_sku].dropna().unique()
     resultados = []
     barra = st.progress(0, text="Rodando backtesting...")
-
     for idx, sku in enumerate(skus):
         serie = df_base[df_base[col_sku] == sku][col_demanda].reset_index(drop=True)
         row = {'sku': sku}
         melhor_wmape, melhor_nome = np.inf, 'MA-3'
-
         for nome, fn in METODOS.items():
             w, _, _ = backtest_sku(serie, fn, n_test=n_test)
             row[f'wmape_{nome}'] = w
             if pd.notna(w) and w < melhor_wmape:
                 melhor_wmape, melhor_nome = w, nome
-
         row['melhor_metodo'] = melhor_nome
         row['melhor_wmape'] = melhor_wmape if melhor_wmape < np.inf else np.nan
         resultados.append(row)
         barra.progress((idx + 1) / len(skus), text=f"Backtesting: {idx+1}/{len(skus)} SKUs")
-
     barra.empty()
     return pd.DataFrame(resultados)
 
 # ══════════════════════════════════════════════════════════════
-# CLASSIFICAÇÃO DA DEMANDA
+# CLASSIFICAÇÃO
 # ══════════════════════════════════════════════════════════════
 
 def classificar_demanda(serie: pd.Series) -> str:
     s = serie.dropna()
-    if len(s) == 0:
-        return "Indefinida"
+    if len(s) == 0: return "Indefinida"
     zeros = (s == 0).sum() / len(s)
     mean_v = s.mean()
     cv = s.std() / mean_v if mean_v > 0 else np.inf
-
-    if zeros > 0.50:
-        return "Intermitente"
-    if zeros > 0.25 and cv > 0.5:
-        return "Esporádica"
-    if cv < 0.25:
-        return "Estável"
-    if cv < 0.60:
-        return "Variável"
+    if zeros > 0.50: return "Intermitente"
+    if zeros > 0.25 and cv > 0.5: return "Esporádica"
+    if cv < 0.25: return "Estável"
+    if cv < 0.60: return "Variável"
     return "Errática"
 
 CLASSE_ICONES = {
-    "Estável":      "🟢",
-    "Variável":     "🟡",
-    "Errática":     "🔴",
-    "Intermitente": "⚪",
-    "Esporádica":   "🔵",
-    "Indefinida":   "⬛",
+    "Estável": "🟢", "Variável": "🟡", "Errática": "🔴",
+    "Intermitente": "⚪", "Esporádica": "🔵", "Indefinida": "⬛",
 }
 
 def detectar_tendencia(serie: pd.Series):
     s = serie.dropna()
-    if len(s) < 4:
-        return 0.0, "➡️ Sem dados"
+    if len(s) < 4: return 0.0, "➡️ Sem dados"
     x = np.arange(len(s))
     slope, _, _, p_value, _ = stats.linregress(x, s.values)
-    if p_value > 0.1:
-        return slope, "➡️ Estável"
+    if p_value > 0.1: return slope, "➡️ Estável"
     return (slope, "📈 Crescente") if slope > 0 else (slope, "📉 Decrescente")
 
 def detectar_sazonalidade(serie: pd.Series) -> str:
     s = serie.dropna()
-    if len(s) < 13:
-        return "Dados insuficientes"
-    # Autocorrelação no lag 12
+    if len(s) < 13: return "Dados insuficientes"
     acf12 = s.autocorr(lag=12)
     if pd.notna(acf12) and abs(acf12) > 0.4:
         return f"🔄 Sazonal (ACF lag12={acf12:.2f})"
     return "— Sem sazonalidade detectada"
 
 # ══════════════════════════════════════════════════════════════
-# IA — GRADIENT BOOSTING COM FEATURES DE LAG
+# IA — GRADIENT BOOSTING
 # ══════════════════════════════════════════════════════════════
 
 def criar_features(serie: pd.Series, n_lags=6) -> pd.DataFrame:
@@ -391,36 +304,28 @@ def criar_features(serie: pd.Series, n_lags=6) -> pd.DataFrame:
     return df.dropna()
 
 N_LAGS = 6
-FEAT_NAMES = (
-    [f'lag_{i}' for i in range(1, N_LAGS+1)] +
-    ['roll_mean_3', 'roll_std_3', 'roll_mean_6', 'roll_min_3', 'roll_max_3']
-)
+FEAT_NAMES = ([f'lag_{i}' for i in range(1, N_LAGS+1)] +
+              ['roll_mean_3', 'roll_std_3', 'roll_mean_6', 'roll_min_3', 'roll_max_3'])
 
 def treinar_ia(serie: pd.Series):
     s = serie.dropna().reset_index(drop=True)
-    if len(s) < 14:
-        return None
+    if len(s) < 14: return None
     df_f = criar_features(s, N_LAGS)
-    if len(df_f) < 6:
-        return None
+    if len(df_f) < 6: return None
     X = df_f[FEAT_NAMES].values
     y = df_f['y'].values
-    model = GradientBoostingRegressor(
-        n_estimators=200, max_depth=3, learning_rate=0.05,
-        subsample=0.8, random_state=42, min_samples_leaf=2
-    )
+    model = GradientBoostingRegressor(n_estimators=200, max_depth=3, learning_rate=0.05,
+                                      subsample=0.8, random_state=42, min_samples_leaf=2)
     try:
         model.fit(X, y)
         return model
     except:
         return None
 
-def prever_ia(model, serie: pd.Series) -> float | None:
-    if model is None:
-        return None
+def prever_ia(model, serie: pd.Series):
+    if model is None: return None
     s = serie.dropna().reset_index(drop=True)
-    if len(s) < N_LAGS:
-        return None
+    if len(s) < N_LAGS: return None
     try:
         last = s.tail(N_LAGS + 3).values.astype(float)
         lags = [last[-(i)] for i in range(1, N_LAGS+1)]
@@ -435,13 +340,9 @@ def prever_ia(model, serie: pd.Series) -> float | None:
         return None
 
 def prever_ia_multistep(model, serie: pd.Series, h: int = 3):
-    """Rolling forecast com IA para h passos.
-    Cada previsão alimenta o passo seguinte (sem data leakage futuro)."""
-    if model is None:
-        return [None] * h
+    if model is None: return [None] * h
     s = list(serie.dropna().values.astype(float))
-    if len(s) < N_LAGS:
-        return [None] * h
+    if len(s) < N_LAGS: return [None] * h
     preds = []
     for _ in range(h):
         try:
@@ -456,17 +357,15 @@ def prever_ia_multistep(model, serie: pd.Series, h: int = 3):
             feats = np.array([*lags, r3, s3, r6, mn3, mx3], dtype=float).reshape(1, -1)
             pred  = float(max(0.0, model.predict(feats)[0]))
             preds.append(pred)
-            s.append(pred)          # <<< alimenta o próximo passo
+            s.append(pred)
         except Exception:
             preds.append(None)
     return preds
 
 def wmape_ia_insample(model, serie: pd.Series):
-    """WMAPE in-sample do modelo de IA"""
     s = serie.dropna().reset_index(drop=True)
     df_f = criar_features(s, N_LAGS)
-    if len(df_f) < 4:
-        return np.nan, np.array([]), np.array([])
+    if len(df_f) < 4: return np.nan, np.array([]), np.array([])
     X = df_f[FEAT_NAMES].values
     y = df_f['y'].values
     preds = np.maximum(0, model.predict(X))
@@ -476,125 +375,64 @@ def wmape_ia_insample(model, serie: pd.Series):
 # EXPORTAÇÃO EXCEL
 # ══════════════════════════════════════════════════════════════
 
-# ──────────────────────────────────────────────────────────
-# EXPORTAÇÃO ESTILIZADA — usada por todos os botões de download
-# ──────────────────────────────────────────────────────────
-
-# Paleta de cores padrão do dashboard
 _XL = {
-    'navy':      '0F2B4F',
-    'teal':      '0D9488',
-    'teal_lt':   '14B8A6',
-    'amber':     'F59E0B',
-    'white':     'FFFFFF',
-    'off_white': 'F8FAFC',
-    'slate':     '64748B',
-    'green':     '22C55E',
-    'red':       'EF4444',
-    'yellow':    'EAB308',
-    'light_green': 'C8E6C9',
-    'light_yellow':'FFF9C4',
-    'light_red':   'FFCDD2',
-    'light_teal':  'E0F2F1',
-    'light_amber': 'FEF9EC',
+    'navy': '0F2B4F', 'teal': '0D9488', 'teal_lt': '14B8A6', 'amber': 'F59E0B',
+    'white': 'FFFFFF', 'off_white': 'F8FAFC', 'slate': '64748B', 'green': '22C55E',
+    'red': 'EF4444', 'yellow': 'EAB308', 'light_green': 'C8E6C9', 'light_yellow': 'FFF9C4',
+    'light_red': 'FFCDD2', 'light_teal': 'E0F2F1', 'light_amber': 'FEF9EC',
 }
 
 def _xl_fmt(wb, **kw):
-    """Cria formato xlsxwriter a partir de kwargs."""
     return wb.add_format(kw)
 
-def _escrever_aba_estilizada(
-    writer, df: pd.DataFrame, nome_aba: str,
-    col_wmape=None,          # nome da coluna de WMAPE (para coloração condicional)
-    col_wmape_escala=1.0,    # 1.0 se decimal, 100.0 se já em %
-    col_metodo=None,         # coluna do melhor método (teal)
-    col_classe=None,         # coluna de classificação (badge)
-    freeze=True,
-    col_widths: dict = None, # {nome_col: largura} override
-):
-    if df is None or len(df) == 0:
-        return
-    wb  = writer.book
-
-    # ── Formatos base ─────────────────────────────────────
+def _escrever_aba_estilizada(writer, df, nome_aba, col_wmape=None, col_wmape_escala=1.0,
+                              col_metodo=None, col_classe=None, freeze=True, col_widths=None):
+    if df is None or len(df) == 0: return
+    wb = writer.book
     hdr = _xl_fmt(wb, bold=True, bg_color=_XL['navy'], font_color=_XL['white'],
-                  border=1, border_color='CCCCCC', align='center', valign='vcenter',
-                  font_size=10, font_name='Calibri')
-    row_par  = _xl_fmt(wb, bg_color=_XL['white'],     border=1, border_color='E2E8F0',
-                       font_size=9, font_name='Calibri', valign='vcenter')
-    row_impar= _xl_fmt(wb, bg_color=_XL['off_white'], border=1, border_color='E2E8F0',
-                       font_size=9, font_name='Calibri', valign='vcenter')
-    # WMAPE condicional
-    fmt_excelente = _xl_fmt(wb, bg_color=_XL['light_green'],  border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', bold=True, font_color='1B5E20')
-    fmt_bom       = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', bold=True, font_color='004D40')
-    fmt_regular   = _xl_fmt(wb, bg_color=_XL['light_yellow'], border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', bold=True, font_color='E65100')
-    fmt_critico   = _xl_fmt(wb, bg_color=_XL['light_red'],    border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', bold=True, font_color='B71C1C')
-    fmt_metodo    = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', bold=True, font_color=_XL['teal'])
-    fmt_num       = _xl_fmt(wb, bg_color=_XL['white'],        border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
-    fmt_num_impar = _xl_fmt(wb, bg_color=_XL['off_white'],    border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
-    fmt_pct       = _xl_fmt(wb, bg_color=_XL['white'],        border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', num_format='0.0%',     valign='vcenter')
-    fmt_pct_impar = _xl_fmt(wb, bg_color=_XL['off_white'],    border=1, border_color='E2E8F0',
-                            font_size=9, font_name='Calibri', num_format='0.0%',     valign='vcenter')
-    # Título da aba
-    titulo_fmt = _xl_fmt(wb, bold=True, bg_color=_XL['teal'], font_color=_XL['white'],
-                         font_size=11, font_name='Calibri', valign='vcenter', align='left')
-    # Legenda inferior
-    leg_hdr = _xl_fmt(wb, bold=True, bg_color=_XL['slate'], font_color=_XL['white'],
-                      font_size=8, font_name='Calibri')
+                  border=1, border_color='CCCCCC', align='center', valign='vcenter', font_size=10, font_name='Calibri')
+    row_par   = _xl_fmt(wb, bg_color=_XL['white'],     border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', valign='vcenter')
+    row_impar = _xl_fmt(wb, bg_color=_XL['off_white'], border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', valign='vcenter')
+    fmt_excelente = _xl_fmt(wb, bg_color=_XL['light_green'],  border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='1B5E20')
+    fmt_bom       = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='004D40')
+    fmt_regular   = _xl_fmt(wb, bg_color=_XL['light_yellow'], border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='E65100')
+    fmt_critico   = _xl_fmt(wb, bg_color=_XL['light_red'],    border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='B71C1C')
+    fmt_metodo    = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color=_XL['teal'])
+    fmt_num       = _xl_fmt(wb, bg_color=_XL['white'],        border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
+    fmt_num_impar = _xl_fmt(wb, bg_color=_XL['off_white'],    border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
+    fmt_pct       = _xl_fmt(wb, bg_color=_XL['white'],        border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', num_format='0.0%', valign='vcenter')
+    fmt_pct_impar = _xl_fmt(wb, bg_color=_XL['off_white'],    border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', num_format='0.0%', valign='vcenter')
+    titulo_fmt = _xl_fmt(wb, bold=True, bg_color=_XL['teal'], font_color=_XL['white'], font_size=11, font_name='Calibri', valign='vcenter', align='left')
+    leg_hdr = _xl_fmt(wb, bold=True, bg_color=_XL['slate'], font_color=_XL['white'], font_size=8, font_name='Calibri')
 
-    # ── Detectar colunas de tipo numérico / % ────────────
     cols = list(df.columns)
     n_cols = len(cols)
     wmape_idx  = cols.index(col_wmape)  if col_wmape  and col_wmape  in cols else None
     metodo_idx = cols.index(col_metodo) if col_metodo and col_metodo in cols else None
+    sku_idx_list = [i for i, c in enumerate(cols) if c.upper() in ('SKU','COD. MATERIAL','CODIGO','MATERIAL','ITEM') or 'sku' in c.lower()]
 
-    # Colunas que devem ser tratadas como texto (SKU)
-    sku_idx_list = [i for i, c in enumerate(cols)
-                    if c.upper() in ('SKU', 'COD. MATERIAL', 'CODIGO', 'MATERIAL', 'ITEM')
-                    or 'sku' in c.lower()]
-
-    # Escrever na aba (dados brutos para manter valores numéricos)
     df.to_excel(writer, sheet_name=nome_aba, index=False, startrow=2, header=False)
     ws = writer.sheets[nome_aba]
-
-    # ── Linha de título da aba (row 0) ───────────────────
     ws.set_row(0, 22)
-    ws.merge_range(0, 0, 0, max(n_cols-1, 0), f'  {nome_aba.replace("_", " ").upper()}', titulo_fmt)
-
-    # ── Cabeçalhos (row 1) ───────────────────────────────
+    ws.merge_range(0, 0, 0, max(n_cols-1, 0), f'  {nome_aba.replace("_"," ").upper()}', titulo_fmt)
     ws.set_row(1, 20)
     for ci, col in enumerate(cols):
         ws.write(1, ci, str(col), hdr)
 
-    # ── Dados (a partir de row 2) ────────────────────────
     for ri, row in enumerate(df.itertuples(index=False)):
         ws.set_row(ri + 2, 16)
         bg_par = ri % 2 == 0
         for ci, val in enumerate(row):
             col_name = cols[ci]
-            # Determinar formato
-            is_wmape_col = (ci == wmape_idx)
-            is_metodo_col= (ci == metodo_idx)
-            is_pct_col   = isinstance(val, str) and str(val).strip().endswith('%')
-            is_num       = isinstance(val, (int, float)) and not pd.isna(val)
+            is_wmape_col  = (ci == wmape_idx)
+            is_metodo_col = (ci == metodo_idx)
+            is_num = isinstance(val, (int, float)) and not pd.isna(val)
 
             if ci in sku_idx_list:
-                # SKU sempre como texto
                 fmt_sku = _xl_fmt(wb, bg_color=_XL['white'] if bg_par else _XL['off_white'],
-                                  border=1, border_color='E2E8F0', font_size=9,
-                                  font_name='Calibri', valign='vcenter', num_format='@')
-                ws.write_string(ri+2, ci, str(int(val)) if isinstance(val, float) and val == int(val)
-                                else str(val) if val is not None else '—', fmt_sku)
+                                  border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', valign='vcenter', num_format='@')
+                ws.write_string(ri+2, ci, str(int(val)) if isinstance(val, float) and val == int(val) else str(val) if val is not None else '—', fmt_sku)
             elif is_wmape_col:
-                # Coloração condicional por faixa
                 raw = val
                 if isinstance(raw, str) and raw.endswith('%'):
                     try: raw = float(raw.replace('%','').replace(',','.').strip()) / 100
@@ -611,76 +449,55 @@ def _escrever_aba_estilizada(
             elif is_metodo_col:
                 ws.write(ri+2, ci, str(val) if val is not None else '—', fmt_metodo)
             elif is_num and ('wmape' in col_name.lower() or 'erro' in col_name.lower() or '%' in col_name):
-                fmt_use = fmt_pct if bg_par else fmt_pct_impar
-                ws.write(ri+2, ci, val, fmt_use)
+                ws.write(ri+2, ci, val, fmt_pct if bg_par else fmt_pct_impar)
             elif is_num:
-                fmt_use = fmt_num if bg_par else fmt_num_impar
-                ws.write(ri+2, ci, val, fmt_use)
+                ws.write(ri+2, ci, val, fmt_num if bg_par else fmt_num_impar)
             else:
                 fmt_use = row_par if bg_par else row_impar
                 ws.write(ri+2, ci, str(val) if val is not None and not (isinstance(val, float) and pd.isna(val)) else '—', fmt_use)
 
-    # ── Larguras das colunas ─────────────────────────────
     default_w = 16
     col_w_map = col_widths or {}
     for ci, col in enumerate(cols):
-        w = col_w_map.get(col, default_w)
-        ws.set_column(ci, ci, w)
+        ws.set_column(ci, ci, col_w_map.get(col, default_w))
 
-    # ── Freeze pane ─────────────────────────────────────
     if freeze:
         ws.freeze_panes(2, 0)
 
-    # ── Legenda de WMAPE ─────────────────────────────────
     leg_row = len(df) + 4
     ws.write(leg_row, 0, 'Legenda WMAPE', leg_hdr)
     for j, (lbl, bg, fc) in enumerate([
-        ('< 20%  — Excelente',    _XL['light_green'],  '1B5E20'),
-        ('20–35% — Bom ⭐',       _XL['light_teal'],   '004D40'),
-        ('35–60% — Regular',      _XL['light_yellow'], 'E65100'),
-        ('> 60%  — Crítico',      _XL['light_red'],    'B71C1C'),
+        ('< 20%  — Excelente', _XL['light_green'],  '1B5E20'),
+        ('20–35% — Bom ⭐',    _XL['light_teal'],   '004D40'),
+        ('35–60% — Regular',   _XL['light_yellow'], 'E65100'),
+        ('> 60%  — Crítico',   _XL['light_red'],    'B71C1C'),
     ], 1):
         ws.write(leg_row + j, 0, lbl, _xl_fmt(wb, bg_color=bg, font_color=fc,
                                                font_size=8, font_name='Calibri', bold=True,
                                                border=1, border_color='CCCCCC'))
 
-
 def exportar_excel_visual(abas: dict, filename_prefix: str = 'forecast') -> io.BytesIO:
-    """
-    abas: dict { nome_aba: { 'df': DataFrame, 'col_wmape': str|None,
-                              'col_metodo': str|None, 'col_widths': dict|None } }
-    """
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='xlsxwriter') as writer:
         for nome_aba, cfg in abas.items():
-            _escrever_aba_estilizada(
-                writer,
-                df=cfg.get('df'),
-                nome_aba=nome_aba,
-                col_wmape=cfg.get('col_wmape'),
-                col_wmape_escala=cfg.get('col_wmape_escala', 1.0),
-                col_metodo=cfg.get('col_metodo'),
-                col_widths=cfg.get('col_widths'),
-            )
-        # Aba de legenda geral
+            _escrever_aba_estilizada(writer, df=cfg.get('df'), nome_aba=nome_aba,
+                col_wmape=cfg.get('col_wmape'), col_wmape_escala=cfg.get('col_wmape_escala', 1.0),
+                col_metodo=cfg.get('col_metodo'), col_widths=cfg.get('col_widths'))
         wb = writer.book
         ls = wb.add_worksheet('Legenda_Geral')
         ls.set_column(0, 0, 35)
-        hf = wb.add_format({'bold':True,'bg_color':_XL['navy'],'font_color':_XL['white'],
-                            'font_size':10,'font_name':'Calibri','border':1})
+        hf = wb.add_format({'bold':True,'bg_color':_XL['navy'],'font_color':_XL['white'],'font_size':10,'font_name':'Calibri','border':1})
         ls.write(0, 0, 'Legenda Geral do Arquivo', hf)
         for i, (txt, bg, fc) in enumerate([
-            ('WMAPE < 20%  — Excelente (verde escuro)',    _XL['light_green'],  '1B5E20'),
-            ('WMAPE 20–35% — Bom ⭐ (teal)',              _XL['light_teal'],   '004D40'),
-            ('WMAPE 35–60% — Regular (amarelo)',           _XL['light_yellow'], 'E65100'),
-            ('WMAPE > 60%  — Crítico (vermelho)',          _XL['light_red'],    'B71C1C'),
-            ('Método Base  — Melhor método (teal)',        _XL['light_teal'],   _XL['teal']),
+            ('WMAPE < 20%  — Excelente (verde escuro)', _XL['light_green'],  '1B5E20'),
+            ('WMAPE 20–35% — Bom ⭐ (teal)',            _XL['light_teal'],   '004D40'),
+            ('WMAPE 35–60% — Regular (amarelo)',         _XL['light_yellow'], 'E65100'),
+            ('WMAPE > 60%  — Crítico (vermelho)',        _XL['light_red'],    'B71C1C'),
+            ('Método Base  — Melhor método (teal)',      _XL['light_teal'],   _XL['teal']),
         ], 1):
-            ls.write(i, 0, txt, wb.add_format({'bg_color':bg,'font_color':fc,'font_size':9,
-                                               'font_name':'Calibri','bold':True,'border':1}))
+            ls.write(i, 0, txt, wb.add_format({'bg_color':bg,'font_color':fc,'font_size':9,'font_name':'Calibri','bold':True,'border':1}))
     buf.seek(0)
     return buf
-
 
 @st.cache_data(show_spinner=False)
 def calcular_wmape_janela(_df_base_hash, df_base_ref, col_sku_r, col_periodo_r,
@@ -690,8 +507,7 @@ def calcular_wmape_janela(_df_base_hash, df_base_ref, col_sku_r, col_periodo_r,
     _df_per = df_base_ref[[col_ano_r, col_periodo_r]].copy()
     _df_per["_mn"] = _df_per[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_c).fillna(0).astype(int)
     _df_per["_an"] = pd.to_numeric(_df_per[col_ano_r], errors="coerce").fillna(0).astype(int)
-    _periodos_sorted = (_df_per[["_an","_mn"]].drop_duplicates()
-                        .sort_values(["_an","_mn"]).tail(n_meses))
+    _periodos_sorted = (_df_per[["_an","_mn"]].drop_duplicates().sort_values(["_an","_mn"]).tail(n_meses))
     _periodo_keys = set(zip(_periodos_sorted["_an"], _periodos_sorted["_mn"]))
     _df_full = df_base_ref.copy()
     _df_full["__mn"] = _df_full[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_c).fillna(0).astype(int)
@@ -700,57 +516,35 @@ def calcular_wmape_janela(_df_base_hash, df_base_ref, col_sku_r, col_periodo_r,
     _df_full = _df_full[_df_full["__key"].isin(_periodo_keys)]
     MIN_REG = 3
     wmape_map, nreg_map = {}, {}
-
-    # Buscar série COMPLETA (histórico todo) para cada SKU — usada como treino
-    # quando a janela filtrada é curta demais para walk-forward
     _df_full_sku = df_base_ref.copy()
     _df_full_sku["__mn2"] = _df_full_sku[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_c).fillna(0).astype(int)
     _df_full_sku["__an2"] = pd.to_numeric(_df_full_sku[col_ano_r], errors="coerce").fillna(0).astype(int)
 
     for _sku in df_ia_ref["sku"].unique():
-        # Série filtrada pela janela
-        _s = (_df_full[_df_full[col_sku_r] == _sku]
-              .sort_values(["__an","__mn"])[col_demanda_r]
-              .reset_index(drop=True).astype(float))
+        _s = (_df_full[_df_full[col_sku_r] == _sku].sort_values(["__an","__mn"])[col_demanda_r].reset_index(drop=True).astype(float))
         n = len(_s)
         nreg_map[_sku] = n
-
         if n < MIN_REG:
             wmape_map[_sku] = np.nan
             continue
-
         _rb = df_bt_ref[df_bt_ref["sku"] == _sku] if df_bt_ref is not None else pd.DataFrame()
         _met = _rb.iloc[0]["melhor_metodo"] if len(_rb) > 0 else "MA-3"
         _fn = METODOS[_met]
-
         if n >= 5:
-            # Janela longa o suficiente — walk-forward normal
             _nt = min(2, max(1, n - 2))
             _w, _, _ = backtest_sku(_s, _fn, n_test=_nt)
             wmape_map[_sku] = _w if pd.notna(_w) else np.nan
         else:
-            # Janela curta (3-4 meses): treina na série completa e prediz cada ponto da janela
-            # Isso é um WMAPE de validação cruzada simples — não é walk-forward puro,
-            # mas é a melhor aproximação possível para janelas muito curtas
-            _s_full = (_df_full_sku[_df_full_sku[col_sku_r] == _sku]
-                       .sort_values(["__an2","__mn2"])[col_demanda_r]
-                       .reset_index(drop=True).astype(float))
-            # Pegar o histórico anterior à janela como treino
+            _s_full = (_df_full_sku[_df_full_sku[col_sku_r] == _sku].sort_values(["__an2","__mn2"])[col_demanda_r].reset_index(drop=True).astype(float))
             _n_full = len(_s_full)
-            _n_antes = _n_full - n   # períodos antes da janela
-            if _n_antes >= 3:
-                _s_treino = _s_full.iloc[:_n_antes]
-            else:
-                _s_treino = _s_full  # fallback: usar toda a série
-
+            _n_antes = _n_full - n
+            _s_treino = _s_full.iloc[:_n_antes] if _n_antes >= 3 else _s_full
             try:
                 _pred_fixo = _fn(_s_treino, h=1)[0]
-                # WMAPE: mesmo preditor fixo para todos os meses da janela
                 _actual = _s.values
                 _denom = np.sum(np.abs(_actual))
                 if _denom > 0:
-                    _w = np.sum(np.abs(_actual - _pred_fixo)) / _denom
-                    wmape_map[_sku] = float(_w)
+                    wmape_map[_sku] = float(np.sum(np.abs(_actual - _pred_fixo)) / _denom)
                 else:
                     wmape_map[_sku] = np.nan
             except Exception:
@@ -758,13 +552,18 @@ def calcular_wmape_janela(_df_base_hash, df_base_ref, col_sku_r, col_periodo_r,
 
     return wmape_map, nreg_map, MIN_REG, _periodo_keys
 
+# ══════════════════════════════════════════════════════════════
+# IA OUT-OF-SAMPLE — AGORA COM FILTRO POR CLASSE (skus_alvo)
+# ══════════════════════════════════════════════════════════════
+
 @st.cache_data(show_spinner=False)
 def calcular_wmape_ia_oos(_base_hash, df_base_ref, col_sku_r, col_periodo_r,
-                          col_ano_r, col_demanda_r, df_ia_ref, n_test: int = 2):
+                          col_ano_r, col_demanda_r, df_ia_ref, n_test: int = 2,
+                          skus_alvo: frozenset = None):
     """
-    Walk-forward out-of-sample da IA: re-treina o modelo para cada período de teste.
-    Retorna dict {sku: wmape_oos} e dict {sku: dict com detalhes}.
-    Cacheado — só recalcula se os dados mudarem.
+    Walk-forward out-of-sample da IA.
+    skus_alvo: frozenset de SKUs para avaliar (derivado do filtro de classe).
+               None = todos os SKUs elegíveis da base.
     """
     meses_ord_oos = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,
                      "jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
@@ -773,29 +572,23 @@ def calcular_wmape_ia_oos(_base_hash, df_base_ref, col_sku_r, col_periodo_r,
     _df["__mn"] = _df[col_periodo_r].astype(str).str.lower().str[:3].map(meses_ord_oos).fillna(0).astype(int)
     _df["__an"] = pd.to_numeric(_df[col_ano_r], errors="coerce").fillna(0).astype(int)
 
-    wmape_oos_map  = {}
-    detalhe_map    = {}
-    MIN_PERIODOS   = 14 + n_test  # mínimo para treinar IA + ter dados de teste
+    wmape_oos_map = {}
+    detalhe_map   = {}
+    MIN_PERIODOS  = 14 + n_test
 
-    # Filtrar apenas os SKUs da lista alvo (se definida)
-    _skus_alvo = set([
-        90268,91086,90261,90262,91198,90550,91201,91623,91085,91638,
-        91123,91197,91125,91124,90580,91200,91203,91624,90292,91122,
-        90289,90293,90210,90212,90264,90253,91639,91202,90266,90548,
-        90547,90272,42829,90549,90290,90288,37866,90285,90295,90560,
-        90299,90291,451,42774,92047,90287,90511,90512,90274,90208,
-        37865,90282,90298,90392,90283,90296,90284,90286,90263,42773,
-        90258,42839,42780,90297,42775,90391,90254,90273,90259,90270,
-        90267,90894,91199,37864,91121
-    ])
-    # Converter para float pois o df pode ter sku como float
-    _skus_alvo_f = {float(s) for s in _skus_alvo} | {int(s) for s in _skus_alvo}
-    _skus_para_rodar = [s for s in df_ia_ref["sku"].unique()
-                        if s in _skus_alvo_f or int(s) in _skus_alvo]
+    # ── Filtrar SKUs conforme segmentação por classe ─────────
+    if skus_alvo is not None and len(skus_alvo) > 0:
+        _skus_alvo_int = {int(s) for s in skus_alvo}
+        _skus_para_rodar = [
+            s for s in df_ia_ref["sku"].unique()
+            if int(s) in _skus_alvo_int
+        ]
+    else:
+        # Sem filtro: roda todos os SKUs elegíveis
+        _skus_para_rodar = list(df_ia_ref["sku"].unique())
 
     for sku in _skus_para_rodar:
-        serie = (_df[_df[col_sku_r] == sku]
-                 .sort_values(["__an","__mn"])[col_demanda_r]
+        serie = (_df[_df[col_sku_r] == sku].sort_values(["__an","__mn"])[col_demanda_r]
                  .reset_index(drop=True).astype(float))
         n = len(serie)
 
@@ -805,23 +598,18 @@ def calcular_wmape_ia_oos(_base_hash, df_base_ref, col_sku_r, col_periodo_r,
             continue
 
         actuals, preds_ia, preds_stat = [], [], []
-        # Buscar melhor método estatístico deste SKU (para comparação lado a lado)
-        _rb = df_ia_ref[df_ia_ref["sku"] == sku]
+        _rb  = df_ia_ref[df_ia_ref["sku"] == sku]
         _met = _rb.iloc[0]["melhor_metodo"] if len(_rb) > 0 else "MA-3"
         _fn  = METODOS[_met]
 
         for step in range(n_test, 0, -1):
             treino = serie.iloc[:n - step]
-            # Re-treina IA com o conjunto de treino daquele ponto
             _modelo_oos = treinar_ia(treino)
             _pred_ia    = prever_ia(_modelo_oos, treino) if _modelo_oos else None
-
-            # Predição estatística para comparação
             try:
                 _pred_stat = float(_fn(treino, h=1)[0])
             except Exception:
                 _pred_stat = float(treino.mean())
-
             actuals.append(float(serie.iloc[n - step]))
             preds_ia.append(float(_pred_ia) if _pred_ia is not None else _pred_stat)
             preds_stat.append(_pred_stat)
@@ -831,14 +619,10 @@ def calcular_wmape_ia_oos(_base_hash, df_base_ref, col_sku_r, col_periodo_r,
 
         wmape_oos_map[sku] = w_oos if pd.notna(w_oos) else np.nan
         detalhe_map[sku] = {
-            "status":       "OK",
-            "wmape_ia_oos": w_oos,
-            "wmape_stat_oos": w_stat,
-            "n_test":       n_test,
-            "actuals":      actuals,
-            "preds_ia":     preds_ia,
-            "preds_stat":   preds_stat,
-            "met_stat":     _met,
+            "status": "OK",
+            "wmape_ia_oos": w_oos, "wmape_stat_oos": w_stat, "n_test": n_test,
+            "actuals": actuals, "preds_ia": preds_ia, "preds_stat": preds_stat,
+            "met_stat": _met,
             "recomendacao": (
                 "✅ IA é mais confiável — aumente o peso no slider"
                 if pd.notna(w_oos) and pd.notna(w_stat) and w_oos < w_stat
@@ -850,19 +634,16 @@ def calcular_wmape_ia_oos(_base_hash, df_base_ref, col_sku_r, col_periodo_r,
 
     return wmape_oos_map, detalhe_map
 
-
-# Manter compatibilidade com código legado
 def exportar_excel(df_bt, df_ia, df_top10):
     abas = {
-        'Backtesting_Completo': {'df': df_bt,   'col_wmape': 'melhor_wmape', 'col_metodo': 'melhor_metodo'},
-        'Sugestoes_IA':         {'df': df_ia,   'col_wmape': 'wmape_melhor', 'col_metodo': 'melhor_metodo'},
-        'Top10_Piores_WMAPE':   {'df': df_top10,'col_wmape': 'wmape_pct',    'col_wmape_escala': 100.0,
-                                 'col_metodo': 'melhor_metodo'},
+        'Backtesting_Completo': {'df': df_bt,    'col_wmape': 'melhor_wmape', 'col_metodo': 'melhor_metodo'},
+        'Sugestoes_IA':         {'df': df_ia,    'col_wmape': 'wmape_melhor', 'col_metodo': 'melhor_metodo'},
+        'Top10_Piores_WMAPE':   {'df': df_top10, 'col_wmape': 'wmape_pct', 'col_wmape_escala': 100.0, 'col_metodo': 'melhor_metodo'},
     }
     return exportar_excel_visual(abas)
 
 # ══════════════════════════════════════════════════════════════
-# GERAÇÃO DE TEXTO DE SUGESTÃO
+# SUGESTÃO AUTOMÁTICA
 # ══════════════════════════════════════════════════════════════
 
 def gerar_sugestao(row_ia, wmape_val):
@@ -901,6 +682,7 @@ def gerar_sugestao(row_ia, wmape_val):
 
     return " ".join(sugestoes)
 
+
 # ══════════════════════════════════════════════════════════════
 # APLICAÇÃO PRINCIPAL
 # ══════════════════════════════════════════════════════════════
@@ -913,9 +695,8 @@ def main():
         st.divider()
 
         uploaded_file = st.file_uploader(
-            "📂 Faça upload do arquivo Excel",
-            type=["xlsx"],
-            help="Selecione o arquivo .xlsx com as abas: Base_Limpa, Estatistica_SKU, etc."
+            "📂 Faça upload do arquivo Excel", type=["xlsx"],
+            help="Selecione o arquivo .xlsx com as abas: Base_Limpa, Base_Dados, etc."
         )
 
         if uploaded_file is None:
@@ -931,26 +712,69 @@ def main():
             st.caption(f"🎯 Peso automático ativo: {_n_auto_side} SKUs calibrados pelo OOS")
         else:
             st.caption("Slider global aplicado a todos os SKUs")
-        n_test = st.slider("Períodos de backtesting (walk-forward)", 2, 6, 3,
-                           help="Quantos períodos finais usar para avaliar cada método")
+
+        # ── Informativo de saneamento (situação ≠ Normal) ────
+        _n_desc = st.session_state.get('n_descartados_situacao', 0)
+        if _n_desc > 0:
+            st.warning(f"⚠️ **{_n_desc} SKUs descartados** — situação ≠ Normal")
+
+        n_test = st.slider("Períodos de backtesting (walk-forward)", 2, 6, 3)
         peso_ia = st.slider("Peso da IA na previsão combinada (%)", 0, 100, 50,
-                            help="Fallback global — SKUs com OOS calibrado usam peso automático (0%, 50% ou 70%)") / 100
+                            help="Fallback global — SKUs com OOS calibrado usam peso automático") / 100
         st.divider()
         rodar = st.button("🚀 Rodar Pipeline Completo", type="primary", use_container_width=True)
         if st.button("🗑️ Limpar Cache", use_container_width=True):
             st.cache_data.clear()
-            for k in ['df_backtest', 'df_ia', 'df_oos', 'peso_por_sku', '_det_oos']:
+            for k in ['df_backtest', 'df_ia', 'df_oos', 'peso_por_sku', '_det_oos',
+                      'n_descartados_situacao', 'df_sku_meta', 'classes_disponiveis']:
                 st.session_state.pop(k, None)
             st.rerun()
 
         st.divider()
         st.markdown("**🔬 Análise Avançada**")
-        n_test_oos = st.slider("Períodos de teste out-of-sample", 1, 3, 2,
-                               help="Quantos períodos usar no walk-forward da IA. "
-                                    "Mais períodos = mais preciso, mais lento.")
-        rodar_oos = st.button("🔬 IA Out-of-Sample", use_container_width=True,
-                              help="Avalia a IA em dados que ela nunca viu. "
-                                   "Permite calibrar o peso ideal por SKU.")
+        n_test_oos = st.slider("Períodos de teste out-of-sample", 1, 3, 2)
+
+        # ── FILTRO DE CLASSE PARA IA OOS ─────────────────────
+        _classes_disp = st.session_state.get('classes_disponiveis', [])
+        if _classes_disp:
+            st.markdown("**🏷️ Segmentação por Classe**")
+            _busca_classe = st.text_input(
+                "🔍 Pesquisar classe", key='busca_classe_oos',
+                placeholder="Ex: MOB, FERRAGEM..."
+            )
+            _classes_filtradas = (
+                [c for c in _classes_disp if _busca_classe.lower() in c.lower()]
+                if _busca_classe.strip() else _classes_disp
+            )
+            _classes_sel = st.multiselect(
+                "Selecionar classes para OOS",
+                options=_classes_filtradas,
+                default=[c for c in st.session_state.get('classes_selecionadas_oos', []) if c in _classes_filtradas],
+                key='classes_sel_oos',
+                help="Deixe vazio para avaliar todos os SKUs elegíveis"
+            )
+            st.session_state['classes_selecionadas_oos'] = _classes_sel
+
+            # Flag de segmentação ativa
+            _df_meta_sb = st.session_state.get('df_sku_meta', pd.DataFrame())
+            if _classes_sel and not _df_meta_sb.empty and 'classe' in _df_meta_sb.columns:
+                _cls_codes_sb = [c.split(' — ')[0].strip() for c in _classes_sel]
+                _n_skus_sel_sb = _df_meta_sb[_df_meta_sb['classe'].astype(str).isin(_cls_codes_sb)]['sku'].nunique()
+                st.markdown(
+                    f'<div class="seg-flag">🎯 Segmentação ativa<br/>'
+                    f'{len(_classes_sel)} classe(s) · {_n_skus_sel_sb} SKUs</div>',
+                    unsafe_allow_html=True
+                )
+            elif not _classes_sel:
+                st.caption("Sem segmentação — todos os SKUs elegíveis")
+        else:
+            st.caption("ℹ️ Suba o arquivo para habilitar o filtro de classe")
+
+        rodar_oos = st.button(
+            "🔬 IA Out-of-Sample", use_container_width=True,
+            help="Avalia a IA em dados que ela nunca viu. "
+                 "Respeita o filtro de classe selecionado acima."
+        )
 
     # ─── CABEÇALHO ─────────────────────────────────────────────
     st.title("📡 SONAR")
@@ -970,7 +794,7 @@ def main():
     df_aval = _av1 if _av1 is not None else _av2
 
     if df_base is None:
-        st.error("Aba com histórico de demanda não encontrada. Verifique o nome da aba (ex: Base_Limpa).")
+        st.error("Aba com histórico de demanda não encontrada.")
         with st.expander("Abas encontradas no arquivo"):
             st.write(dados.get('abas', []))
         st.stop()
@@ -981,12 +805,64 @@ def main():
     col_demanda = encontrar_coluna(df_base, 'demanda', 'consumo', 'quantidade', 'qtd', 'qtde', 'realizado')
 
     if not col_sku or not col_demanda:
-        st.error(f"Colunas de SKU e/ou demanda não encontradas. Colunas disponíveis: {list(df_base.columns)}")
+        st.error(f"Colunas de SKU e/ou demanda não encontradas. Colunas: {list(df_base.columns)}")
         st.stop()
 
     df_base[col_demanda] = pd.to_numeric(df_base[col_demanda], errors='coerce').fillna(0)
 
-    # Criar coluna de período combinado Ano+Mês para contagem correta
+    # ══════════════════════════════════════════════════════════
+    # PROCESSAR BASE_DADOS: situação (saneamento) + meta de classe
+    # ══════════════════════════════════════════════════════════
+    df_dados_raw = dados.get('base_dados')
+
+    if df_dados_raw is not None:
+        _col_sku_d  = encontrar_coluna(df_dados_raw, 'sku', 'material', 'codigo', 'cod')
+        _col_sit    = encontrar_coluna(df_dados_raw, 'situacao', 'situacao', 'status')
+        _col_cls    = encontrar_coluna(df_dados_raw, 'classedematerial', 'classematerial', 'classe')
+        _col_desc   = encontrar_coluna(df_dados_raw, 'descricaodaclasse', 'descricaoclasse', 'descclasse', 'descricao')
+
+        if _col_sku_d:
+            cols_meta = [c for c in [_col_sku_d, _col_sit, _col_cls, _col_desc] if c]
+            df_sku_meta = df_dados_raw[cols_meta].drop_duplicates(subset=[_col_sku_d]).copy()
+            rename_map = {_col_sku_d: 'sku'}
+            if _col_sit:  rename_map[_col_sit]  = 'situacao'
+            if _col_cls:  rename_map[_col_cls]  = 'classe'
+            if _col_desc: rename_map[_col_desc] = 'descricao_classe'
+            df_sku_meta = df_sku_meta.rename(columns=rename_map)
+
+            # ── 1. SANEAMENTO: descartar SKUs com situação ≠ Normal ──
+            if 'situacao' in df_sku_meta.columns:
+                _skus_normais = set(
+                    df_sku_meta[
+                        df_sku_meta['situacao'].astype(str).str.strip().str.lower() == 'normal'
+                    ]['sku'].unique()
+                )
+                _n_antes  = df_base[col_sku].nunique()
+                df_base   = df_base[df_base[col_sku].isin(_skus_normais)].copy()
+                _n_depois = df_base[col_sku].nunique()
+                _n_desc   = _n_antes - _n_depois
+                st.session_state['n_descartados_situacao'] = _n_desc
+            else:
+                st.session_state['n_descartados_situacao'] = 0
+
+            # ── 2. CLASSES: construir lista para o filtro OOS ─────────
+            if 'classe' in df_sku_meta.columns and 'descricao_classe' in df_sku_meta.columns:
+                _classes_opts = (
+                    df_sku_meta[['classe', 'descricao_classe']]
+                    .dropna()
+                    .drop_duplicates()
+                    .sort_values('classe')
+                    .apply(lambda r: f"{r['classe']} — {r['descricao_classe']}", axis=1)
+                    .tolist()
+                )
+                st.session_state['classes_disponiveis'] = _classes_opts
+                st.session_state['df_sku_meta'] = df_sku_meta
+            elif 'classe' in df_sku_meta.columns:
+                _classes_opts = sorted(df_sku_meta['classe'].dropna().unique().tolist())
+                st.session_state['classes_disponiveis'] = [str(c) for c in _classes_opts]
+                st.session_state['df_sku_meta'] = df_sku_meta
+
+    # ─── PERÍODO COMBINADO ─────────────────────────────────────
     if col_ano and col_periodo:
         df_base['_periodo_combined'] = df_base[col_ano].astype(str) + '_' + df_base[col_periodo].astype(str)
         col_periodo_count = '_periodo_combined'
@@ -995,7 +871,6 @@ def main():
     else:
         col_periodo_count = None
 
-    # Colunas WMAPE do arquivo original (se existir)
     wmape_original = None
     if df_aval is not None:
         col_wmape_orig = encontrar_coluna(df_aval, 'wmape')
@@ -1004,9 +879,9 @@ def main():
             wmape_original = df_aval.groupby(col_sku_aval)[col_wmape_orig].mean().to_dict()
 
     # ─── MÉTRICAS RÁPIDAS ──────────────────────────────────────
-    n_skus = df_base[col_sku].nunique()
-    n_reg  = len(df_base)
-    n_per  = df_base[col_periodo_count].nunique() if col_periodo_count else "—"
+    n_skus  = df_base[col_sku].nunique()
+    n_reg   = len(df_base)
+    n_per   = df_base[col_periodo_count].nunique() if col_periodo_count else "—"
     med_dem = df_base[col_demanda].mean()
 
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -1018,24 +893,17 @@ def main():
     st.divider()
 
     # ─── ESTADO DA SESSÃO ──────────────────────────────────────
-    if 'df_backtest' not in st.session_state:
-        st.session_state['df_backtest'] = None
-    if 'df_ia' not in st.session_state:
-        st.session_state['df_ia'] = None
-    if 'df_oos' not in st.session_state:
-        st.session_state['df_oos'] = None   # resultados do out-of-sample
-    if 'peso_por_sku' not in st.session_state:
-        st.session_state['peso_por_sku'] = {}  # pesos automáticos por SKU (do OOS)
+    for key in ['df_backtest', 'df_ia', 'df_oos', 'peso_por_sku']:
+        if key not in st.session_state:
+            st.session_state[key] = None if key != 'peso_por_sku' else {}
 
     # ─── RODAR PIPELINE ────────────────────────────────────────
     if rodar:
-        # ETAPA 1: Backtesting
         with st.status("🔄 Executando pipeline...", expanded=True) as status:
-            st.write("📊 Etapa 1/3 — Backtesting walk-forward por SKU e método...")
+            st.write("📊 Etapa 1/3 — Backtesting walk-forward...")
             df_bt = rodar_backtesting(df_base, col_sku, col_demanda, n_test)
             st.session_state['df_backtest'] = df_bt
 
-            # ETAPA 2: IA por SKU
             st.write("🤖 Etapa 2/3 — Treinando modelos de IA por SKU...")
             ia_rows = []
             skus_all = df_base[col_sku].unique()
@@ -1043,27 +911,20 @@ def main():
 
             for idx, sku in enumerate(skus_all):
                 serie = df_base[df_base[col_sku] == sku][col_demanda].reset_index(drop=True)
-
                 model_ia  = treinar_ia(serie)
                 pred_ia   = prever_ia(model_ia, serie)
                 wmape_ia  = np.nan
-
-                # Melhor método estatístico
                 row_bt = df_bt[df_bt['sku'] == sku]
                 if len(row_bt) > 0:
-                    melhor    = row_bt.iloc[0]['melhor_metodo']
-                    melhor_w  = row_bt.iloc[0]['melhor_wmape']
+                    melhor   = row_bt.iloc[0]['melhor_metodo']
+                    melhor_w = row_bt.iloc[0]['melhor_wmape']
                 else:
                     melhor, melhor_w = 'MA-3', np.nan
-
                 fn_melhor = METODOS[melhor]
                 pred_stat = fn_melhor(serie, h=1)[0]
-
-                # Previsão combinada — usa peso automático do OOS se disponível
                 _pesos_oos = st.session_state.get('peso_por_sku', {})
                 _peso_sku  = _pesos_oos.get(sku, _pesos_oos.get(float(sku), None))
                 _peso_efetivo = _peso_sku if _peso_sku is not None else peso_ia
-
                 if pred_ia is not None:
                     pred_comb = _peso_efetivo * pred_ia + (1 - _peso_efetivo) * pred_stat
                     if model_ia:
@@ -1072,90 +933,93 @@ def main():
                     pred_comb = pred_stat
                     _peso_efetivo = 0.0
 
-                # Características da demanda
                 classe  = classificar_demanda(serie)
                 _, tend = detectar_tendencia(serie)
                 sazon   = detectar_sazonalidade(serie)
-
                 row_dict = {
-                    'sku':                   sku,
-                    'classificacao':         classe,
-                    'tendencia':             tend,
-                    'sazonalidade':          sazon,
-                    'n_periodos':            len(serie),
-                    'media_historica':       round(serie.mean(), 2),
-                    'cv':                    round(serie.std() / serie.mean(), 3) if serie.mean() > 0 else np.nan,
-                    'previsao_estatistica':  round(pred_stat, 2),
-                    'previsao_ia':           round(pred_ia, 2) if pred_ia is not None else np.nan,
-                    'previsao_combinada':    round(pred_comb, 2),
-                    'melhor_metodo':         melhor,
-                    'wmape_melhor':          melhor_w,
-                    'wmape_ia_insample':     wmape_ia,
-                    'peso_ia_usado':         round(_peso_efetivo * 100, 0),  # % usado na combinação
+                    'sku': sku, 'classificacao': classe, 'tendencia': tend,
+                    'sazonalidade': sazon, 'n_periodos': len(serie),
+                    'media_historica': round(serie.mean(), 2),
+                    'cv': round(serie.std() / serie.mean(), 3) if serie.mean() > 0 else np.nan,
+                    'previsao_estatistica': round(pred_stat, 2),
+                    'previsao_ia': round(pred_ia, 2) if pred_ia is not None else np.nan,
+                    'previsao_combinada': round(pred_comb, 2),
+                    'melhor_metodo': melhor, 'wmape_melhor': melhor_w,
+                    'wmape_ia_insample': wmape_ia,
+                    'peso_ia_usado': round(_peso_efetivo * 100, 0),
                 }
                 if wmape_original:
                     row_dict['wmape_original'] = wmape_original.get(sku, np.nan)
-
                 ia_rows.append(row_dict)
                 barra2.progress((idx+1)/len(skus_all), text=f"IA: {idx+1}/{len(skus_all)}")
 
             barra2.empty()
             st.session_state['df_ia'] = pd.DataFrame(ia_rows)
-
-            # ETAPA 3: Finalização
             st.write("✅ Etapa 3/3 — Consolidando resultados...")
             status.update(label="✅ Pipeline concluído com sucesso!", state="complete")
-
         st.rerun()
 
-    # ─── Gatilho Out-of-Sample ────────────────────────────────
-    if 'rodar_oos' in dir() and rodar_oos:
+    # ─── GATILHO OUT-OF-SAMPLE ────────────────────────────────
+    if rodar_oos:
         df_ia_loaded = st.session_state.get('df_ia')
         if df_ia_loaded is not None and len(df_ia_loaded) > 0:
-            _base_hash_oos = str(len(df_base)) + str(df_base[col_demanda].sum())                              if 'df_base' in dir() and df_base is not None else "0"
-            with st.status("🔬 Calculando WMAPE Out-of-Sample da IA...", expanded=True) as _oos_status:
-                st.write(f"Treinando IA {n_test_oos}× por SKU em dados nunca vistos...")
+            _base_hash_oos = str(len(df_base)) + str(df_base[col_demanda].sum())
+
+            # ── Resolver SKUs pelo filtro de classe ──────────
+            _classes_sel_oos = st.session_state.get('classes_selecionadas_oos', [])
+            _df_meta_oos     = st.session_state.get('df_sku_meta', pd.DataFrame())
+            _skus_filtrados  = None  # None = todos
+
+            if _classes_sel_oos and not _df_meta_oos.empty and 'classe' in _df_meta_oos.columns:
+                _cls_codes_oos = [c.split(' — ')[0].strip() for c in _classes_sel_oos]
+                _skus_filtrados = frozenset(
+                    _df_meta_oos[
+                        _df_meta_oos['classe'].astype(str).isin(_cls_codes_oos)
+                    ]['sku'].unique()
+                )
+                _label_seg = f"{len(_classes_sel_oos)} classe(s) — {len(_skus_filtrados)} SKUs"
+            else:
+                _label_seg = "Todos os SKUs elegíveis"
+
+            with st.status(f"🔬 IA Out-of-Sample — {_label_seg}", expanded=True) as _oos_status:
+                st.write(f"Segmentação: **{_label_seg}** | {n_test_oos} períodos de teste por SKU")
                 _woos_map, _det_map = calcular_wmape_ia_oos(
                     _base_hash_oos, df_base, col_sku, col_periodo,
-                    col_ano, col_demanda, df_ia_loaded, n_test=n_test_oos
+                    col_ano, col_demanda, df_ia_loaded, n_test=n_test_oos,
+                    skus_alvo=_skus_filtrados
                 )
                 df_oos_result = df_ia_loaded[['sku','melhor_metodo','wmape_melhor']].copy()
-                df_oos_result['wmape_ia_oos']   = df_oos_result['sku'].map(_woos_map)
-                df_oos_result['wmape_stat_oos']  = df_oos_result['sku'].apply(
-                    lambda s: _det_map.get(s, {}).get('wmape_stat_oos', np.nan))
-                df_oos_result['recomendacao']    = df_oos_result['sku'].apply(
-                    lambda s: _det_map.get(s, {}).get('recomendacao', '—'))
-                df_oos_result['status']          = df_oos_result['sku'].apply(
-                    lambda s: _det_map.get(s, {}).get('status', '—'))
-                # Calcular peso automático por SKU baseado no OOS
+                df_oos_result['wmape_ia_oos']    = df_oos_result['sku'].map(_woos_map)
+                df_oos_result['wmape_stat_oos']  = df_oos_result['sku'].apply(lambda s: _det_map.get(s, {}).get('wmape_stat_oos', np.nan))
+                df_oos_result['recomendacao']    = df_oos_result['sku'].apply(lambda s: _det_map.get(s, {}).get('recomendacao', '—'))
+                df_oos_result['status']          = df_oos_result['sku'].apply(lambda s: _det_map.get(s, {}).get('status', '—'))
+
                 _peso_por_sku = {}
                 for _sku_oos, _det in _det_map.items():
-                    if _det.get('status') != 'OK':
-                        continue  # série curta — vai usar o slider global
+                    if _det.get('status') != 'OK': continue
                     _w_ia   = _det.get('wmape_ia_oos',  np.nan)
                     _w_stat = _det.get('wmape_stat_oos', np.nan)
-                    if pd.isna(_w_ia) or pd.isna(_w_stat) or _w_stat == 0:
-                        continue
+                    if pd.isna(_w_ia) or pd.isna(_w_stat) or _w_stat == 0: continue
                     ratio = _w_ia / _w_stat
-                    if ratio < 0.90:
-                        _peso_por_sku[_sku_oos] = 0.70   # IA claramente melhor
-                    elif ratio <= 1.10:
-                        _peso_por_sku[_sku_oos] = 0.50   # desempenho similar
-                    else:
-                        _peso_por_sku[_sku_oos] = 0.00   # estatístico melhor — IA zerada
+                    if ratio < 0.90:   _peso_por_sku[_sku_oos] = 0.70
+                    elif ratio <= 1.10: _peso_por_sku[_sku_oos] = 0.50
+                    else:               _peso_por_sku[_sku_oos] = 0.00
 
-                df_oos_result['peso_ia_automatico'] = df_oos_result['sku'].apply(
-                    lambda s: _peso_por_sku.get(s, np.nan)
-                )
-                df_oos_result['peso_ia_pct'] = df_oos_result['peso_ia_automatico'].apply(
+                df_oos_result['peso_ia_automatico'] = df_oos_result['sku'].apply(lambda s: _peso_por_sku.get(s, np.nan))
+                df_oos_result['peso_ia_pct']        = df_oos_result['peso_ia_automatico'].apply(
                     lambda x: f"{x*100:.0f}%" if pd.notna(x) else "slider global"
                 )
+                # Salvar segmentação usada para exibição
+                df_oos_result['_segmentacao'] = _label_seg
 
                 st.session_state['df_oos']       = df_oos_result
-                st.session_state['_det_oos']      = _det_map
-                st.session_state['peso_por_sku']  = _peso_por_sku   # ← chave principal
+                st.session_state['_det_oos']     = _det_map
+                st.session_state['peso_por_sku'] = _peso_por_sku
+                st.session_state['_oos_segmentacao'] = _label_seg
                 _oos_status.update(label="✅ Out-of-Sample concluído!", state="complete")
             st.rerun()
+        else:
+            st.warning("⚠️ Rode o Pipeline Completo antes de calcular o OOS.")
 
     df_bt = st.session_state.get('df_backtest')
     df_ia = st.session_state.get('df_ia')
@@ -1164,12 +1028,8 @@ def main():
     # TABS
     # ═══════════════════════════════════════════════════════════
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Simulação Retrospectiva",
-        "🎯 Seletor de Método",
-        "🔍 Análise por SKU",
-        "🤖 IA + Previsão",
-        "📋 Top 10 Piores WMAPE",
-        "📖 Guia do Usuário",
+        "📊 Simulação Retrospectiva", "🎯 Seletor de Método", "🔍 Análise por SKU",
+        "🤖 IA + Previsão", "📋 Top 10 Piores WMAPE", "📖 Guia do Usuário",
     ])
 
     # ─────────────────────────────────────────────────────────
@@ -1177,11 +1037,7 @@ def main():
     # ─────────────────────────────────────────────────────────
     with tab1:
         st.subheader("📊 Comparação Retrospectiva — Walk-Forward Validation")
-        st.markdown("""
-        Para cada SKU, o pipeline simula como **cada método teria se saído nos últimos N períodos**,
-        treinando apenas com dados passados (sem *data leakage*). Isso responde: *"Se eu tivesse usado
-        este método, qual seria o WMAPE real?"*
-        """)
+        st.markdown("Para cada SKU, o pipeline simula como **cada método teria se saído nos últimos N períodos**, treinando apenas com dados passados (sem *data leakage*).")
 
         if df_bt is None:
             st.info("👆 Clique em **🚀 Rodar Pipeline Completo** na barra lateral para iniciar.")
@@ -1189,73 +1045,50 @@ def main():
 
         wmape_cols = [c for c in df_bt.columns if c.startswith('wmape_')]
         metodos_nomes = [c.replace('wmape_', '') for c in wmape_cols]
-
-        # Resumo por método
-        # WMAPE original (do arquivo) por SKU para calcular ganho
-        wmape_orig_por_sku = {}
-        if wmape_original:
-            wmape_orig_por_sku = wmape_original  # dict sku → wmape
+        wmape_orig_por_sku = wmape_original or {}
         med_wmape_orig = np.nanmedian(list(wmape_orig_por_sku.values())) if wmape_orig_por_sku else np.nan
 
         resumo = []
         for col, nome in zip(wmape_cols, metodos_nomes):
-            vals      = df_bt[col].dropna()
-            n_melhor  = (df_bt['melhor_metodo'] == nome).sum()
+            vals       = df_bt[col].dropna()
+            n_melhor   = (df_bt['melhor_metodo'] == nome).sum()
             n_abaixo35 = (vals < 0.35).sum()
-            med_v5    = vals.median()
-            ganho_str = "—"
+            med_v5     = vals.median()
+            ganho_str  = "—"
             if pd.notna(med_wmape_orig) and med_wmape_orig > 0:
                 ganho = (med_wmape_orig - med_v5) / med_wmape_orig * 100
-                sinal = "▲" if ganho >= 0 else "▼"
-                ganho_str = f"{sinal} {abs(ganho):.1f}%"
+                ganho_str = f"{'▲' if ganho >= 0 else '▼'} {abs(ganho):.1f}%"
             resumo.append({
-                'Método':              nome,
-                'Descrição':           METODOS_DESC.get(nome, ''),
-                'SKUs — Melhor':       int(n_melhor),
-                '% SKUs':             f"{n_melhor/len(df_bt)*100:.0f}%",
-                'SKUs WMAPE < 35%':    int(n_abaixo35),
-                '% SKUs < 35%':       f"{n_abaixo35/max(len(vals),1)*100:.0f}%",
-                'Ganho vs Original':   ganho_str,
+                'Método': nome, 'Descrição': METODOS_DESC.get(nome, ''),
+                'SKUs — Melhor': int(n_melhor), '% SKUs': f"{n_melhor/len(df_bt)*100:.0f}%",
+                'SKUs WMAPE < 35%': int(n_abaixo35), '% SKUs < 35%': f"{n_abaixo35/max(len(vals),1)*100:.0f}%",
+                'Ganho vs Original': ganho_str,
             })
 
         df_res = pd.DataFrame(resumo).sort_values('SKUs WMAPE < 35%', ascending=False)
         st.dataframe(df_res, use_container_width=True, hide_index=True)
 
         col_a, col_b = st.columns(2)
-
         with col_a:
-            # Box plot
             melt_data = []
             for col, nome in zip(wmape_cols, metodos_nomes):
                 for v in df_bt[col].dropna():
                     melt_data.append({'Método': nome, 'WMAPE (%)': v * 100})
             df_melt = pd.DataFrame(melt_data)
-
             ordem = df_melt.groupby('Método')['WMAPE (%)'].median().sort_values().index.tolist()
-            fig_box = px.box(
-                df_melt, x='Método', y='WMAPE (%)',
-                title='Distribuição do WMAPE por Método',
-                color='Método', category_orders={'Método': ordem},
-                template='plotly_white', points='outliers'
-            )
+            fig_box = px.box(df_melt, x='Método', y='WMAPE (%)', title='Distribuição do WMAPE por Método',
+                             color='Método', category_orders={'Método': ordem}, template='plotly_white', points='outliers')
             fig_box.update_layout(showlegend=False, xaxis_tickangle=-30)
-            fig_box.add_hline(y=20, line_dash='dash', line_color='green',
-                              annotation_text='Meta 20%', annotation_position='right')
+            fig_box.add_hline(y=20, line_dash='dash', line_color='green', annotation_text='Meta 20%', annotation_position='right')
             st.plotly_chart(fig_box, use_container_width=True)
 
         with col_b:
-            # Distribuição dos melhores métodos
             counts = df_bt['melhor_metodo'].value_counts().reset_index()
             counts.columns = ['Método', 'Qtd']
-            fig_pie = px.pie(
-                counts, values='Qtd', names='Método',
-                title='Melhor Método por SKU (backtesting)',
-                template='plotly_white', hole=0.4
-            )
+            fig_pie = px.pie(counts, values='Qtd', names='Método', title='Melhor Método por SKU (backtesting)', template='plotly_white', hole=0.4)
             fig_pie.update_traces(textinfo='label+percent')
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        # Comparação com WMAPE original (se disponível)
         if wmape_original and df_ia is not None:
             st.divider()
             st.markdown("### 📉 Ganho vs Arquivo Original")
@@ -1265,209 +1098,88 @@ def main():
             if len(df_comp) > 0:
                 df_comp['ganho'] = df_comp['wmape_original'] - df_comp['wmape_melhor']
                 df_comp['ganho_pct'] = df_comp['ganho'] / (df_comp['wmape_original'] + 1e-9) * 100
-                ganho_med = df_comp['ganho_pct'].median()
-                n_melhora = (df_comp['ganho'] > 0).sum()
-
                 gc1, gc2, gc3 = st.columns(3)
-                gc1.metric("SKUs com WMAPE melhorado", f"{n_melhora}/{len(df_comp)}")
-                gc2.metric("Ganho mediano no WMAPE", f"{ganho_med:.1f}%")
+                gc1.metric("SKUs com WMAPE melhorado", f"{(df_comp['ganho'] > 0).sum()}/{len(df_comp)}")
+                gc2.metric("Ganho mediano no WMAPE", f"{df_comp['ganho_pct'].median():.1f}%")
                 gc3.metric("Total SKUs comparados", len(df_comp))
-
-                fig_ganho = px.scatter(
-                    df_comp, x='wmape_original', y='wmape_melhor',
-                    hover_data=['sku', 'ganho_pct'],
-                    title='WMAPE Original vs WMAPE Novo (pipeline V5)',
-                    labels={'wmape_original': 'WMAPE Original', 'wmape_melhor': 'WMAPE Novo (V5)'},
-                    template='plotly_white', color='ganho',
-                    color_continuous_scale='RdYlGn'
-                )
-                fig_ganho.add_shape(type='line', x0=0, y0=0, x1=1, y1=1,
-                                    line=dict(dash='dash', color='gray'))
+                fig_ganho = px.scatter(df_comp, x='wmape_original', y='wmape_melhor', hover_data=['sku','ganho_pct'],
+                                       title='WMAPE Original vs WMAPE Novo (SONAR)', template='plotly_white', color='ganho', color_continuous_scale='RdYlGn')
+                fig_ganho.add_shape(type='line', x0=0, y0=0, x1=1, y1=1, line=dict(dash='dash', color='gray'))
                 fig_ganho.update_layout(coloraxis_showscale=False)
                 st.plotly_chart(fig_ganho, use_container_width=True)
 
-        # ── TABELA MENSAL POR SKU ──────────────────────────────
         st.divider()
         st.markdown("### 📋 Comparativo Mensal por SKU")
-        st.markdown("Visão mensal com demanda planejada (original), realizado e melhor previsão do pipeline V5.")
-
         if df_ia is not None and col_periodo and col_ano:
-            # Montar períodos disponíveis como Ano+Mês
-            meses_ord = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
-                         'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
+            meses_ord = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
             df_mensal = df_base[[col_sku, col_ano, col_periodo, col_demanda]].copy()
             df_mensal.columns = ['sku','ano','mes','realizado']
             df_mensal['mes_num'] = df_mensal['mes'].astype(str).str.lower().str[:3].map(meses_ord).fillna(0).astype(int)
             df_mensal['periodo_lbl'] = df_mensal['mes'].astype(str).str.lower().str[:3] + '/' + df_mensal['ano'].astype(str).str[-2:]
-
-            periodos_disp = (df_mensal[['ano','mes_num','periodo_lbl']]
-                             .drop_duplicates()
-                             .sort_values(['ano','mes_num'])['periodo_lbl'].tolist())
-
+            periodos_disp = (df_mensal[['ano','mes_num','periodo_lbl']].drop_duplicates().sort_values(['ano','mes_num'])['periodo_lbl'].tolist())
             col_f1, col_f2 = st.columns([2, 4])
-            per_sel = col_f1.selectbox("📅 Filtrar por período", options=periodos_disp,
-                                        index=len(periodos_disp)-1 if periodos_disp else 0,
-                                        key='tab1_per_sel')
-
+            per_sel = col_f1.selectbox("📅 Filtrar por período", options=periodos_disp, index=len(periodos_disp)-1 if periodos_disp else 0, key='tab1_per_sel')
             df_per = df_mensal[df_mensal['periodo_lbl'] == per_sel].copy()
-
-            # Agregar por SKU (caso tenha duplicatas)
             df_per = df_per.groupby('sku', as_index=False)['realizado'].sum()
 
-            # ── Previsão original e WMAPE do período filtrado ────────
-            prev_orig_map   = {}   # sku → previsão do arquivo no mês
-            wmape_orig_per_map = {}  # sku → WMAPE do arquivo naquele período (Σerro/Σdemanda)
-
+            prev_orig_map = {}
+            wmape_orig_per_map = {}
             if df_aval is not None:
                 col_prev_orig = encontrar_coluna(df_aval, 'prev', 'previsao', 'forecast', 'hibrido')
                 col_mes_aval  = encontrar_coluna(df_aval, 'mes', 'periodo', 'referencia')
                 col_sku_aval2 = encontrar_coluna(df_aval, 'sku', 'material', 'codigo')
                 col_ano_aval  = encontrar_coluna(df_aval, 'ano', 'year')
-
                 if col_prev_orig and col_mes_aval and col_sku_aval2:
                     df_aval_f = df_aval.copy()
                     df_aval_f['_mes_abr'] = df_aval_f[col_mes_aval].astype(str).str.lower().str[:3]
                     mes_sel_abr = per_sel[:3].lower()
-
-                    # Filtrar também pelo ano se possível
-                    ano_sel = per_sel[-2:]  # ex: '25' de 'jan/25'
+                    ano_sel = per_sel[-2:]
                     if col_ano_aval:
                         df_aval_f['_ano_abr'] = df_aval_f[col_ano_aval].astype(str).str[-2:]
-                        df_aval_per = df_aval_f[
-                            (df_aval_f['_mes_abr'] == mes_sel_abr) &
-                            (df_aval_f['_ano_abr'] == ano_sel)
-                        ]
-                        # Fallback: só mês se não achar por ano+mês
+                        df_aval_per = df_aval_f[(df_aval_f['_mes_abr'] == mes_sel_abr) & (df_aval_f['_ano_abr'] == ano_sel)]
                         if len(df_aval_per) == 0:
                             df_aval_per = df_aval_f[df_aval_f['_mes_abr'] == mes_sel_abr]
                     else:
                         df_aval_per = df_aval_f[df_aval_f['_mes_abr'] == mes_sel_abr]
-
                     prev_orig_map = df_aval_per.groupby(col_sku_aval2)[col_prev_orig].mean().to_dict()
 
-                    # WMAPE do período: Soma_Erro_Hibrido / Soma_Consumo (do arquivo)
-                    col_soma_erro = encontrar_coluna(df_aval, 'somaerro', 'errohibrido', 'somaerrohibrido')
-                    col_soma_dem  = encontrar_coluna(df_aval, 'somaconsumо', 'somaconsуmo', 'somaconsuma')
-                    # busca manual mais robusta
-                    _soma_erro_col, _soma_dem_col = None, None
-                    for c in df_aval.columns:
-                        cn = ''.join(filter(str.isalpha, str(c))).lower()
-                        if 'somaerrо' in cn or ('soma' in cn and 'erro' in cn and 'hibrido' in cn):
-                            _soma_erro_col = c
-                        if 'somaconsumo' in cn or ('soma' in cn and 'consumo' in cn):
-                            _soma_dem_col = c
-
-                    # fallback: procurar por nome exato
-                    for c in df_aval.columns:
-                        if str(c) == 'Soma_Erro_Hibrido':
-                            _soma_erro_col = c
-                        if str(c) == 'Soma_Consumo':
-                            _soma_dem_col = c
-
-                    if _soma_erro_col and _soma_dem_col:
-                        grp = df_aval_per.groupby(col_sku_aval2).agg(
-                            _se=(  _soma_erro_col, 'sum'),
-                            _sd=(_soma_dem_col,  'sum')
-                        )
-                        grp['_wmape_per'] = np.where(
-                            grp['_sd'] > 0,
-                            grp['_se'].abs() / grp['_sd'],
-                            np.nan
-                        )
-                        wmape_orig_per_map = grp['_wmape_per'].to_dict()
-
-            # Melhor previsão V5
             melhor_prev_map = df_ia.set_index('sku')['previsao_combinada'].to_dict() if df_ia is not None else {}
             wmape_v5_map    = df_ia.set_index('sku')['wmape_melhor'].to_dict() if df_ia is not None else {}
-
             df_per['prev_original']  = df_per['sku'].apply(lambda x: prev_orig_map.get(x, np.nan))
             df_per['prev_v5']        = df_per['sku'].apply(lambda x: melhor_prev_map.get(x, np.nan))
             df_per['wmape_v5']       = df_per['sku'].apply(lambda x: wmape_v5_map.get(x, np.nan))
-            # WMAPE Original agora é do período, não mais a média anual
-            df_per['wmape_original'] = df_per['sku'].apply(
-                lambda x: wmape_orig_per_map.get(x,
-                    wmape_orig_per_map.get(float(x) if str(x).isdigit() else x, np.nan))
-            )
+            df_per['wmape_original'] = df_per['sku'].apply(lambda x: wmape_orig_per_map.get(x, np.nan))
+            df_per['erro_prev_orig'] = np.where(df_per['realizado'] > 0, abs(df_per['prev_original'] - df_per['realizado']) / df_per['realizado'] * 100, np.nan)
+            df_per['erro_prev_v5']   = np.where(df_per['realizado'] > 0, abs(df_per['prev_v5'] - df_per['realizado']) / df_per['realizado'] * 100, np.nan)
 
-            # Calcular erro percentual do período
-            df_per['erro_prev_orig'] = np.where(
-                df_per['realizado'] > 0,
-                abs(df_per['prev_original'] - df_per['realizado']) / df_per['realizado'] * 100,
-                np.nan
-            )
-            df_per['erro_prev_v5'] = np.where(
-                df_per['realizado'] > 0,
-                abs(df_per['prev_v5'] - df_per['realizado']) / df_per['realizado'] * 100,
-                np.nan
-            )
-
-            df_per_show = df_per.rename(columns={
-                'sku':           'SKU',
-                'realizado':     'Realizado',
-                'prev_original': 'Prev. Original (arquivo)',
-                'prev_v5':       'Melhor Prev. V5',
-                'wmape_v5':      'WMAPE V5 (backtesting)',
-                'wmape_original':'WMAPE Original (período)',
-                'erro_prev_orig':'Erro % Prev. Original',
-                'erro_prev_v5':  'Erro % Prev. V5',
-            }).copy()
-
-            # Formatar colunas WMAPE — já estão em decimal (0-1), multiplicar por 100
-            for col_fmt in ['WMAPE V5 (backtesting)', 'WMAPE Original (período)']:
+            df_per_show = df_per.rename(columns={'sku':'SKU','realizado':'Realizado','prev_original':'Prev. Original (arquivo)',
+                                                  'prev_v5':'Melhor Prev. SONAR','wmape_v5':'WMAPE SONAR (backtesting)',
+                                                  'wmape_original':'WMAPE Original (período)','erro_prev_orig':'Erro % Prev. Original','erro_prev_v5':'Erro % Prev. SONAR'}).copy()
+            for col_fmt in ['WMAPE SONAR (backtesting)','WMAPE Original (período)']:
                 if col_fmt in df_per_show.columns:
-                    df_per_show[col_fmt] = df_per_show[col_fmt].apply(
-                        lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—"
-                    )
-            # Erros já estão em % (0-100), não multiplicar
-            for col_fmt in ['Erro % Prev. Original', 'Erro % Prev. V5']:
+                    df_per_show[col_fmt] = df_per_show[col_fmt].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—")
+            for col_fmt in ['Erro % Prev. Original','Erro % Prev. SONAR']:
                 if col_fmt in df_per_show.columns:
-                    df_per_show[col_fmt] = df_per_show[col_fmt].apply(
-                        lambda x: f"{x:.1f}%" if pd.notna(x) else "—"
-                    )
-            for col_fmt in ['Prev. Original (arquivo)', 'Melhor Prev. V5', 'Realizado']:
+                    df_per_show[col_fmt] = df_per_show[col_fmt].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
+            for col_fmt in ['Prev. Original (arquivo)','Melhor Prev. SONAR','Realizado']:
                 if col_fmt in df_per_show.columns:
-                    df_per_show[col_fmt] = df_per_show[col_fmt].apply(
-                        lambda x: f"{x:,.1f}" if pd.notna(x) else "—"
-                    )
+                    df_per_show[col_fmt] = df_per_show[col_fmt].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "—")
 
-            st.caption(f"Período selecionado: **{per_sel}** — {len(df_per_show)} SKUs")
+            st.caption(f"Período: **{per_sel}** — {len(df_per_show)} SKUs")
             st.dataframe(df_per_show, use_container_width=True, hide_index=True)
 
-            # Mini-resumo do período
             r_col1, r_col2, r_col3, r_col4 = st.columns(4)
             total_real = df_per['realizado'].sum()
             total_v5   = df_per['prev_v5'].sum()
             r_col1.metric("Total Realizado", f"{total_real:,.0f}")
-            r_col2.metric("Total Prev. V5",  f"{total_v5:,.0f}")
-            r_col3.metric("Diferença",        f"{total_v5 - total_real:,.0f}",
-                          delta=f"{(total_v5-total_real)/max(total_real,1)*100:.1f}%")
+            r_col2.metric("Total Prev. SONAR", f"{total_v5:,.0f}")
+            r_col3.metric("Diferença", f"{total_v5-total_real:,.0f}", delta=f"{(total_v5-total_real)/max(total_real,1)*100:.1f}%")
 
-            # Export com visual do dashboard
-            df_mensal_exp = df_per.rename(columns={
-                'sku':'SKU','realizado':'Realizado',
-                'prev_original':'Prev. Original (arquivo)',
-                'prev_v5':'Melhor Prev. V5',
-                'wmape_v5':'WMAPE V5 (backtesting)',
-                'wmape_original':'WMAPE Original (período)',
-                'erro_prev_orig':'Erro % Prev. Original',
-                'erro_prev_v5':'Erro % Prev. V5',
-            }).copy()
-            buf_mensal = exportar_excel_visual({
-                f'Mensal_{per_sel.replace("/","_")}': {
-                    'df': df_mensal_exp,
-                    'col_wmape': 'WMAPE V5 (backtesting)',
-                    'col_widths': {'SKU':12,'Realizado':14,'Prev. Original (arquivo)':22,
-                                   'Melhor Prev. V5':18,'WMAPE V5 (backtesting)':22,
-                                   'WMAPE Original (período)':24,'Erro % Prev. Original':22,
-                                   'Erro % Prev. V5':18},
-                }
-            })
-            r_col4.download_button(
-                "📥 Exportar Excel",
-                data=buf_mensal,
-                file_name=f"mensal_{per_sel.replace('/','_')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            buf_mensal = exportar_excel_visual({f'Mensal_{per_sel.replace("/","_")}': {
+                'df': df_per.rename(columns={'sku':'SKU','realizado':'Realizado','prev_original':'Prev. Original','prev_v5':'Melhor Prev. SONAR','wmape_v5':'WMAPE SONAR','wmape_original':'WMAPE Original','erro_prev_orig':'Erro % Orig','erro_prev_v5':'Erro % SONAR'}),
+                'col_wmape': 'WMAPE SONAR', 'col_widths': {'SKU':12,'Realizado':14,'Prev. Original':20,'Melhor Prev. SONAR':18,'WMAPE SONAR':18,'WMAPE Original':18,'Erro % Orig':16,'Erro % SONAR':16},
+            }})
+            r_col4.download_button("📥 Exportar Excel", data=buf_mensal, file_name=f"mensal_{per_sel.replace('/','_')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             st.info("Rode o pipeline completo para visualizar a tabela mensal.")
 
@@ -1476,130 +1188,64 @@ def main():
     # ─────────────────────────────────────────────────────────
     with tab2:
         st.subheader("🎯 Melhor Método por SKU")
-        st.markdown("Baseado no backtesting walk-forward, este painel mostra qual método "
-                    "minimiza o WMAPE para cada SKU e como as características da demanda "
-                    "influenciam essa escolha.")
-
         if df_bt is None or df_ia is None:
             st.info("👆 Clique em **🚀 Rodar Pipeline Completo** na barra lateral para iniciar.")
             st.stop()
 
-        df_sel = df_bt[['sku', 'melhor_metodo', 'melhor_wmape']].merge(
-            df_ia[['sku', 'classificacao', 'tendencia', 'cv', 'n_periodos']],
-            on='sku', how='left'
-        )
-
-        # Filtros
+        df_sel = df_bt[['sku','melhor_metodo','melhor_wmape']].merge(df_ia[['sku','classificacao','tendencia','cv','n_periodos']], on='sku', how='left')
         fc1, fc2, fc3 = st.columns(3)
-        f_metodo = fc1.multiselect("Filtrar método",     df_sel['melhor_metodo'].dropna().unique())
-        f_classe = fc2.multiselect("Filtrar classificação", df_sel['classificacao'].dropna().unique())
+        f_metodo    = fc1.multiselect("Filtrar método", df_sel['melhor_metodo'].dropna().unique())
+        f_classe    = fc2.multiselect("Filtrar classificação", df_sel['classificacao'].dropna().unique())
         f_wmape_max = fc3.slider("WMAPE máximo (%)", 0, 200, 100)
-
         df_f = df_sel.copy()
         if f_metodo: df_f = df_f[df_f['melhor_metodo'].isin(f_metodo)]
         if f_classe: df_f = df_f[df_f['classificacao'].isin(f_classe)]
         df_f = df_f[df_f['melhor_wmape'].fillna(999) <= f_wmape_max / 100]
-
         df_display = df_f.copy()
         df_display['melhor_wmape'] = (df_display['melhor_wmape'] * 100).round(1).astype(str) + '%'
         df_display['cv'] = df_display['cv'].round(3)
-
-        df_sel_show = df_display.rename(columns={
-            'sku': 'SKU', 'melhor_metodo': 'Melhor Método',
-            'melhor_wmape': 'WMAPE', 'classificacao': 'Classificação',
-            'tendencia': 'Tendência', 'cv': 'CV', 'n_periodos': 'N Períodos'
-        })
-        st.dataframe(df_sel_show, use_container_width=True, hide_index=True)
+        st.dataframe(df_display.rename(columns={'sku':'SKU','melhor_metodo':'Melhor Método','melhor_wmape':'WMAPE','classificacao':'Classificação','tendencia':'Tendência','cv':'CV','n_periodos':'N Períodos'}), use_container_width=True, hide_index=True)
         st.caption(f"{len(df_f)} SKUs exibidos")
-        # Export estilizado — valores numéricos limpos para o Excel
-        df_sel_exp = df_f.rename(columns={
-            'sku': 'SKU', 'melhor_metodo': 'Melhor Método',
-            'melhor_wmape': 'WMAPE', 'classificacao': 'Classificação',
-            'tendencia': 'Tendência', 'cv': 'CV', 'n_periodos': 'N Períodos'
-        }).copy()
-        buf_sel = exportar_excel_visual({
-            'Melhor_Metodo_por_SKU': {
-                'df': df_sel_exp,
-                'col_wmape': 'WMAPE',
-                'col_metodo': 'Melhor Método',
-                'col_widths': {'SKU':14,'Melhor Método':18,'WMAPE':14,
-                               'Classificação':16,'Tendência':20,'CV':10,'N Períodos':14},
-            }
-        })
-        st.download_button(
-            "📥 Exportar Melhor Método por SKU (.xlsx)",
-            data=buf_sel,
-            file_name=f"melhor_metodo_sku_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+
+        buf_sel = exportar_excel_visual({'Melhor_Metodo_por_SKU': {'df': df_f.rename(columns={'sku':'SKU','melhor_metodo':'Melhor Método','melhor_wmape':'WMAPE','classificacao':'Classificação','tendencia':'Tendência','cv':'CV','n_periodos':'N Períodos'}), 'col_wmape':'WMAPE','col_metodo':'Melhor Método','col_widths':{'SKU':14,'Melhor Método':18,'WMAPE':14,'Classificação':16,'Tendência':20,'CV':10,'N Períodos':14}}})
+        st.download_button("📥 Exportar Melhor Método por SKU (.xlsx)", data=buf_sel, file_name=f"melhor_metodo_sku_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         col_l, col_r = st.columns(2)
-
         with col_l:
-            # Heatmap classificação × método
-            cross = pd.crosstab(
-                df_sel['classificacao'].fillna('N/A'),
-                df_sel['melhor_metodo'].fillna('N/A')
-            )
-            fig_heat = px.imshow(
-                cross, text_auto=True,
-                title='Classificação da Demanda × Melhor Método',
-                color_continuous_scale='Blues', template='plotly_white',
-                aspect='auto'
-            )
+            cross = pd.crosstab(df_sel['classificacao'].fillna('N/A'), df_sel['melhor_metodo'].fillna('N/A'))
+            fig_heat = px.imshow(cross, text_auto=True, title='Classificação da Demanda × Melhor Método', color_continuous_scale='Blues', template='plotly_white', aspect='auto')
             fig_heat.update_layout(xaxis_tickangle=-30)
             st.plotly_chart(fig_heat, use_container_width=True)
-
         with col_r:
-            # WMAPE médio por classificação
             df_cv_wmape = df_sel.copy()
             df_cv_wmape['wmape_pct'] = df_cv_wmape['melhor_wmape'] * 100
-            fig_cls = px.box(
-                df_cv_wmape.dropna(subset=['wmape_pct', 'classificacao']),
-                x='classificacao', y='wmape_pct',
-                color='classificacao',
-                title='WMAPE por Classificação da Demanda',
-                template='plotly_white',
-                labels={'classificacao': 'Classificação', 'wmape_pct': 'WMAPE (%)'}
-            )
+            fig_cls = px.box(df_cv_wmape.dropna(subset=['wmape_pct','classificacao']), x='classificacao', y='wmape_pct', color='classificacao', title='WMAPE por Classificação da Demanda', template='plotly_white', labels={'classificacao':'Classificação','wmape_pct':'WMAPE (%)'})
             fig_cls.update_layout(showlegend=False)
             st.plotly_chart(fig_cls, use_container_width=True)
 
-        # Recomendações automáticas
         st.divider()
         st.markdown("### 💡 Regras de Recomendação Automática")
         regras = [
-            ("🔵 Intermitente",   "Croston ou SBA",     "> 50% de zeros na série"),
-            ("🔴 Errática",       "SES (alpha alto)",   "CV > 0.6"),
-            ("🟡 Variável",       "SES ou Holt",        "CV entre 0.25 e 0.6"),
-            ("🟢 Estável",        "MA-6 ou SES",        "CV < 0.25"),
-            ("📈 Tendência ↑",    "Holt ou Holt-Winters","Slope significativo (p<0.1)"),
-            ("📉 Tendência ↓",    "Holt",               "Slope negativo significativo"),
-            ("🔄 Sazonal",        "Holt-Winters",       "ACF lag-12 > 0.4"),
+            ("🔵 Intermitente","Croston ou SBA","> 50% de zeros na série"),
+            ("🔴 Errática","SES (alpha alto)","CV > 0.6"),
+            ("🟡 Variável","SES ou Holt","CV entre 0.25 e 0.6"),
+            ("🟢 Estável","MA-6 ou SES","CV < 0.25"),
+            ("📈 Tendência ↑","Holt ou Holt-Winters","Slope significativo (p<0.1)"),
+            ("📉 Tendência ↓","Holt","Slope negativo significativo"),
+            ("🔄 Sazonal","Holt-Winters","ACF lag-12 > 0.4"),
         ]
-        df_reg = pd.DataFrame(regras, columns=['Perfil', 'Método Recomendado', 'Critério'])
-        st.dataframe(df_reg, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(regras, columns=['Perfil','Método Recomendado','Critério']), use_container_width=True, hide_index=True)
 
     # ─────────────────────────────────────────────────────────
     # TAB 3: ANÁLISE POR SKU
     # ─────────────────────────────────────────────────────────
     with tab3:
         st.subheader("🔍 Análise Detalhada por SKU")
-
         skus_lista = sorted(df_base[col_sku].dropna().unique())
         sku_sel = st.selectbox("Selecione o SKU", options=skus_lista, key='sku_sel_tab3')
+        serie_sku = df_base[df_base[col_sku] == sku_sel][col_demanda].reset_index(drop=True).astype(float)
+        x_labels = df_base[df_base[col_sku] == sku_sel][col_periodo].reset_index(drop=True).astype(str).tolist() if col_periodo else list(range(len(serie_sku)))
 
-        serie_sku = (df_base[df_base[col_sku] == sku_sel][col_demanda]
-                     .reset_index(drop=True).astype(float))
-
-        if col_periodo:
-            periodos_sku = (df_base[df_base[col_sku] == sku_sel][col_periodo]
-                            .reset_index(drop=True))
-            x_labels = periodos_sku.astype(str).tolist()
-        else:
-            x_labels = list(range(len(serie_sku)))
-
-        # Métricas do SKU
         cls_sku = classificar_demanda(serie_sku)
         slope_sku, tend_sku = detectar_tendencia(serie_sku)
         sazon_sku = detectar_sazonalidade(serie_sku)
@@ -1607,116 +1253,60 @@ def main():
         zeros_pct = (serie_sku == 0).mean() * 100
 
         ms1, ms2, ms3, ms4, ms5, ms6 = st.columns(6)
-        ms1.metric("Média",          f"{serie_sku.mean():.1f}")
-        ms2.metric("Desvio Padrão",  f"{serie_sku.std():.1f}")
-        ms3.metric("CV",             f"{cv_sku:.3f}")
-        ms4.metric("Zeros",          f"{zeros_pct:.0f}%")
-        ms5.metric("Classificação",  f"{CLASSE_ICONES.get(cls_sku,'')} {cls_sku}")
-        ms6.metric("Tendência",      tend_sku)
+        ms1.metric("Média", f"{serie_sku.mean():.1f}")
+        ms2.metric("Desvio Padrão", f"{serie_sku.std():.1f}")
+        ms3.metric("CV", f"{cv_sku:.3f}")
+        ms4.metric("Zeros", f"{zeros_pct:.0f}%")
+        ms5.metric("Classificação", f"{CLASSE_ICONES.get(cls_sku,'')} {cls_sku}")
+        ms6.metric("Tendência", tend_sku)
 
-        # Gráfico principal
         fig_main = go.Figure()
-        fig_main.add_trace(go.Scatter(
-            x=x_labels, y=serie_sku.values,
-            mode='lines+markers', name='Histórico',
-            line=dict(color='#2c3e50', width=2),
-            marker=dict(size=5, color='#2c3e50'),
-            fill='tozeroy', fillcolor='rgba(44,62,80,0.07)'
-        ))
-
-        # Linha de tendência
+        fig_main.add_trace(go.Scatter(x=x_labels, y=serie_sku.values, mode='lines+markers', name='Histórico', line=dict(color='#2c3e50', width=2), marker=dict(size=5), fill='tozeroy', fillcolor='rgba(44,62,80,0.07)'))
         if len(serie_sku) >= 4:
             x_arr = np.arange(len(serie_sku))
             s_, i_ = np.polyfit(x_arr, serie_sku.values, 1)
-            trend_ = s_ * x_arr + i_
-            fig_main.add_trace(go.Scatter(
-                x=x_labels, y=trend_,
-                mode='lines', name='Tendência linear',
-                line=dict(color='#e74c3c', width=1.5, dash='dash')
-            ))
-
-        # Média histórica
-        fig_main.add_hline(y=serie_sku.mean(), line_dash='dot',
-                           line_color='#27ae60', annotation_text='Média')
-
-        # Previsões (ponto futuro)
+            fig_main.add_trace(go.Scatter(x=x_labels, y=s_*x_arr+i_, mode='lines', name='Tendência', line=dict(color='#e74c3c', width=1.5, dash='dash')))
+        fig_main.add_hline(y=serie_sku.mean(), line_dash='dot', line_color='#27ae60', annotation_text='Média')
         cores = px.colors.qualitative.Pastel
         for i, (nome, fn) in enumerate(METODOS.items()):
             try:
                 pred_v = fn(serie_sku, h=1)[0]
-                fig_main.add_trace(go.Scatter(
-                    x=[f"Próx."], y=[pred_v],
-                    mode='markers', name=f'{nome}: {pred_v:.1f}',
-                    marker=dict(size=13, symbol='diamond',
-                                color=cores[i % len(cores)],
-                                line=dict(width=1, color='#333'))
-                ))
-            except:
-                pass
-
-        fig_main.update_layout(
-            title=f'Histórico + Previsões — SKU: {sku_sel}',
-            xaxis_title='Período', yaxis_title='Demanda',
-            template='plotly_white', hovermode='x unified',
-            height=420, legend=dict(orientation='h', yanchor='bottom', y=-0.4)
-        )
+                fig_main.add_trace(go.Scatter(x=["Próx."], y=[pred_v], mode='markers', name=f'{nome}: {pred_v:.1f}', marker=dict(size=13, symbol='diamond', color=cores[i%len(cores)], line=dict(width=1, color='#333'))))
+            except: pass
+        fig_main.update_layout(title=f'Histórico + Previsões — SKU: {sku_sel}', xaxis_title='Período', yaxis_title='Demanda', template='plotly_white', hovermode='x unified', height=420, legend=dict(orientation='h', yanchor='bottom', y=-0.4))
         st.plotly_chart(fig_main, use_container_width=True)
 
         col_a, col_b = st.columns(2)
-
         with col_a:
-            # Tabela comparativa de previsões
             rows_prev = []
             best_method = None
             if df_bt is not None:
                 row_bt = df_bt[df_bt['sku'] == sku_sel]
-                if len(row_bt) > 0:
-                    best_method = row_bt.iloc[0]['melhor_metodo']
-
+                if len(row_bt) > 0: best_method = row_bt.iloc[0]['melhor_metodo']
             for nome, fn in METODOS.items():
-                try:
-                    pred_v = fn(serie_sku, h=1)[0]
-                except:
-                    pred_v = np.nan
+                try: pred_v = fn(serie_sku, h=1)[0]
+                except: pred_v = np.nan
                 w_bt = np.nan
                 if df_bt is not None:
                     rb = df_bt[df_bt['sku'] == sku_sel]
-                    if len(rb) > 0:
-                        w_bt = rb.iloc[0].get(f'wmape_{nome}', np.nan)
-
-                rows_prev.append({
-                    'Método':       nome,
-                    'Previsão':     round(pred_v, 2) if pd.notna(pred_v) else '—',
-                    'WMAPE BT':     f"{w_bt*100:.1f}%" if pd.notna(w_bt) else '—',
-                    'Recomendado':  '⭐ Melhor' if nome == best_method else '',
-                })
-
-            df_tbl = pd.DataFrame(rows_prev)
+                    if len(rb) > 0: w_bt = rb.iloc[0].get(f'wmape_{nome}', np.nan)
+                rows_prev.append({'Método': nome, 'Previsão': round(pred_v, 2) if pd.notna(pred_v) else '—', 'WMAPE BT': f"{w_bt*100:.1f}%" if pd.notna(w_bt) else '—', 'Recomendado': '⭐ Melhor' if nome == best_method else ''})
             st.markdown("**Previsões próximo período**")
-            st.dataframe(df_tbl, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows_prev), use_container_width=True, hide_index=True)
 
         with col_b:
-            # Autocorrelação
             if len(serie_sku) >= 8:
                 max_lag = min(12, len(serie_sku)//2)
                 acf_vals = [serie_sku.autocorr(lag=i) for i in range(1, max_lag+1)]
-                fig_acf = go.Figure(go.Bar(
-                    x=[f'L{i}' for i in range(1, max_lag+1)], y=acf_vals,
-                    marker_color=['#27ae60' if v > 0 else '#e74c3c' for v in acf_vals]
-                ))
+                fig_acf = go.Figure(go.Bar(x=[f'L{i}' for i in range(1, max_lag+1)], y=acf_vals, marker_color=['#27ae60' if v > 0 else '#e74c3c' for v in acf_vals]))
                 conf_95 = 1.96 / np.sqrt(len(serie_sku))
-                fig_acf.add_hline(y=conf_95,  line_dash='dot', line_color='gray')
+                fig_acf.add_hline(y=conf_95, line_dash='dot', line_color='gray')
                 fig_acf.add_hline(y=-conf_95, line_dash='dot', line_color='gray')
-                fig_acf.update_layout(
-                    title='Autocorrelação (ACF)',
-                    yaxis_title='ACF', template='plotly_white',
-                    height=300
-                )
+                fig_acf.update_layout(title='Autocorrelação (ACF)', yaxis_title='ACF', template='plotly_white', height=300)
                 st.plotly_chart(fig_acf, use_container_width=True)
             else:
                 st.info("Série curta — autocorrelação indisponível.")
 
-        # Informações qualitativas
         st.divider()
         ci1, ci2, ci3 = st.columns(3)
         ci1.info(f"**🔍 Classificação:** {cls_sku}\n\n{CLASSE_ICONES.get(cls_sku,'')} Perfil de demanda identificado com base em CV e frequência de zeros.")
@@ -1735,251 +1325,147 @@ def main():
 
         with st.expander("ℹ️ Como funciona a IA neste pipeline?"):
             st.markdown(f"""
-            **Arquitetura:** Gradient Boosting Regressor (scikit-learn)
-            
-            **Features de entrada** (para cada SKU individualmente):
-            - Lags 1 a 6 (últimos 6 períodos observados)
-            - Média móvel 3 períodos (shift 1)
-            - Desvio padrão 3 períodos (shift 1)
-            - Média móvel 6 períodos (shift 1)
-            - Mínimo e máximo dos últimos 3 períodos
-            
-            **Aprendizado com o erro histórico:**  
-            O modelo é treinado *por SKU* usando todos os pares (features_t → demanda_t+1).
-            Isso significa que a IA aprende o padrão específico daquele SKU e pode capturar
-            não-linearidades que os modelos estatísticos clássicos ignoram.
-            
-            **Previsão combinada:**  
-            `prev_comb = {peso_ia*100:.0f}% × IA + {(1-peso_ia)*100:.0f}% × melhor método estatístico`
-            
-            O peso pode ser ajustado no slider da barra lateral.
-            """)
+**Arquitetura:** Gradient Boosting Regressor (scikit-learn) — 200 árvores sequenciais por SKU
 
-        # Seletor de SKU
+**Features de entrada (11 variáveis):** Lags 1–6, Média móvel 3/6, Desvio padrão 3, Mínimo e Máximo 3 períodos
+
+**Previsão combinada:**
+`prev_comb = {peso_ia*100:.0f}% × IA + {(1-peso_ia)*100:.0f}% × melhor método estatístico`
+
+Ajuste o peso no slider da barra lateral. Após rodar o **🔬 IA Out-of-Sample**, o peso é calibrado automaticamente por SKU.
+""")
+
         skus_ia = sorted(df_ia['sku'].dropna().unique())
         sku_ia = st.selectbox("Selecione o SKU para análise da IA", options=skus_ia, key='sku_ia')
-
         row_ia_df = df_ia[df_ia['sku'] == sku_ia]
         if len(row_ia_df) == 0:
             st.warning("SKU não encontrado na tabela de IA.")
             st.stop()
-
         row_ia = row_ia_df.iloc[0].to_dict()
         serie_ia_full = df_base[df_base[col_sku] == sku_ia][col_demanda].reset_index(drop=True).astype(float)
 
-        # Métricas IA
         mi1, mi2, mi3, mi4 = st.columns(4)
-        mi1.metric("Prev. Estatística",    f"{row_ia['previsao_estatistica']:.1f}")
-        mi2.metric("Prev. IA",             f"{row_ia['previsao_ia']:.1f}" if pd.notna(row_ia.get('previsao_ia')) else "N/A (série curta)")
-        mi3.metric("Prev. Combinada",      f"{row_ia['previsao_combinada']:.1f}")
-        mi4.metric("WMAPE Melhor Método",  f"{row_ia['wmape_melhor']*100:.1f}%" if pd.notna(row_ia.get('wmape_melhor')) else "—")
+        mi1.metric("Prev. Estatística",   f"{row_ia['previsao_estatistica']:.1f}")
+        mi2.metric("Prev. IA",            f"{row_ia['previsao_ia']:.1f}" if pd.notna(row_ia.get('previsao_ia')) else "N/A (série curta)")
+        mi3.metric("Prev. Combinada",     f"{row_ia['previsao_combinada']:.1f}")
+        mi4.metric("WMAPE Melhor Método", f"{row_ia['wmape_melhor']*100:.1f}%" if pd.notna(row_ia.get('wmape_melhor')) else "—")
 
-        # Treinar IA on-demand para este SKU (para visualização)
         col_vis1, col_vis2 = st.columns([3, 2])
-
         with col_vis1:
             model_vis = treinar_ia(serie_ia_full)
             if model_vis is not None:
                 wmape_v, y_real, y_pred_ia = wmape_ia_insample(model_vis, serie_ia_full)
                 offset = len(serie_ia_full) - len(y_real)
-
-                # Comparar IA vs melhor método vs real
                 fn_melhor = METODOS[row_ia['melhor_metodo']]
-
-                # Walk-forward in-sample do melhor método
                 preds_stat_is = []
                 for j in range(len(y_real)):
                     idx_t = offset + j
                     s_train = serie_ia_full.iloc[:idx_t]
-                    if len(s_train) >= 2:
-                        preds_stat_is.append(fn_melhor(s_train, h=1)[0])
-                    else:
-                        preds_stat_is.append(serie_ia_full.mean())
-
+                    preds_stat_is.append(fn_melhor(s_train, h=1)[0] if len(s_train) >= 2 else serie_ia_full.mean())
                 x_plot = list(range(offset, len(serie_ia_full)))
-
-                # Construir labels de mês para o eixo X
                 if col_periodo and col_ano:
                     _df_sku_ia = df_base[df_base[col_sku] == sku_ia][[col_ano, col_periodo]].reset_index(drop=True)
-                    _meses_ord_ia = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
-                                     'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
-                    _df_sku_ia['_mn'] = _df_sku_ia[col_periodo].astype(str).str.lower().str[:3].map(_meses_ord_ia).fillna(0)
+                    _mord2 = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
+                    _df_sku_ia['_mn'] = _df_sku_ia[col_periodo].astype(str).str.lower().str[:3].map(_mord2).fillna(0)
                     _df_sku_ia['_an'] = pd.to_numeric(_df_sku_ia[col_ano], errors='coerce').fillna(0)
                     _df_sku_ia = _df_sku_ia.sort_values(['_an','_mn']).reset_index(drop=True)
-                    x_labels_ia_all = [
-                        f"{str(r[col_periodo]).lower()[:3]}/{str(int(r[col_ano]))[-2:]}"
-                        for _, r in _df_sku_ia.iterrows()
-                    ]
-                    # Adicionar label "Próx." para o ponto de previsão
+                    x_labels_ia_all = [f"{str(r[col_periodo]).lower()[:3]}/{str(int(r[col_ano]))[-2:]}" for _, r in _df_sku_ia.iterrows()]
                     _prox_m = (int(_df_sku_ia['_mn'].iloc[-1]) % 12) + 1
                     _prox_a = int(_df_sku_ia['_an'].iloc[-1]) + (1 if _df_sku_ia['_mn'].iloc[-1] == 12 else 0)
-                    _mn2 = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',
-                            7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
+                    _mn2 = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
                     x_labels_ia_prox = [f"{_mn2[_prox_m]}/{str(_prox_a)[-2:]}"]
                 else:
-                    x_labels_ia_all  = [str(i) for i in range(len(serie_ia_full))]
+                    x_labels_ia_all = [str(i) for i in range(len(serie_ia_full))]
                     x_labels_ia_prox = ["Próx."]
-
                 x_labels_ia_plot = [x_labels_ia_all[i] for i in x_plot] if x_plot else []
-
                 fig_ia = go.Figure()
-                fig_ia.add_trace(go.Scatter(
-                    x=x_labels_ia_all,
-                    y=serie_ia_full.values,
-                    mode='lines+markers', name='Histórico Real',
-                    line=dict(color='#2c3e50', width=2), marker=dict(size=4)
-                ))
-                fig_ia.add_trace(go.Scatter(
-                    x=x_labels_ia_plot, y=y_pred_ia, mode='lines',
-                    name=f'IA (WMAPE in-sample={wmape_v*100:.1f}%)',
-                    line=dict(color='#e67e22', width=2, dash='dot')
-                ))
-                fig_ia.add_trace(go.Scatter(
-                    x=x_labels_ia_plot, y=preds_stat_is, mode='lines',
-                    name=f'Método {row_ia["melhor_metodo"]}',
-                    line=dict(color='#3498db', width=1.5, dash='dashdot')
-                ))
-
-                # Próximo período
-                fig_ia.add_trace(go.Scatter(
-                    x=x_labels_ia_prox, y=[row_ia['previsao_combinada']],
-                    mode='markers', name='Prev. Combinada (próx.)',
-                    marker=dict(size=16, symbol='star', color='#e74c3c',
-                                line=dict(width=1.5, color='white'))
-                ))
-
-                fig_ia.update_layout(
-                    title=f'IA vs Modelo Estatístico — SKU {sku_ia}',
-                    xaxis_title='Período', yaxis_title='Demanda',
-                    template='plotly_white', height=400,
-                    legend=dict(orientation='h', y=-0.3)
-                )
+                fig_ia.add_trace(go.Scatter(x=x_labels_ia_all, y=serie_ia_full.values, mode='lines+markers', name='Histórico Real', line=dict(color='#2c3e50', width=2), marker=dict(size=4)))
+                fig_ia.add_trace(go.Scatter(x=x_labels_ia_plot, y=y_pred_ia, mode='lines', name=f'IA (WMAPE={wmape_v*100:.1f}%)', line=dict(color='#e67e22', width=2, dash='dot')))
+                fig_ia.add_trace(go.Scatter(x=x_labels_ia_plot, y=preds_stat_is, mode='lines', name=f'Método {row_ia["melhor_metodo"]}', line=dict(color='#3498db', width=1.5, dash='dashdot')))
+                fig_ia.add_trace(go.Scatter(x=x_labels_ia_prox, y=[row_ia['previsao_combinada']], mode='markers', name='Prev. Combinada (próx.)', marker=dict(size=16, symbol='star', color='#e74c3c', line=dict(width=1.5, color='white'))))
+                fig_ia.update_layout(title=f'IA vs Modelo Estatístico — SKU {sku_ia}', xaxis_title='Período', yaxis_title='Demanda', template='plotly_white', height=400, legend=dict(orientation='h', y=-0.3))
                 st.plotly_chart(fig_ia, use_container_width=True)
             else:
                 st.warning(f"⚠️ Série do SKU {sku_ia} tem menos de 14 períodos — IA não pode ser treinada.")
 
         with col_vis2:
             if model_vis is not None:
-                # Feature importance
-                imp_df = pd.DataFrame({
-                    'Feature': FEAT_NAMES,
-                    'Importância': model_vis.feature_importances_
-                }).sort_values('Importância', ascending=True)
-
-                fig_imp = px.bar(
-                    imp_df, x='Importância', y='Feature',
-                    orientation='h', title='Importância das Features (IA)',
-                    template='plotly_white', color='Importância',
-                    color_continuous_scale='Blues'
-                )
+                imp_df = pd.DataFrame({'Feature': FEAT_NAMES, 'Importância': model_vis.feature_importances_}).sort_values('Importância', ascending=True)
+                fig_imp = px.bar(imp_df, x='Importância', y='Feature', orientation='h', title='Importância das Features (IA)', template='plotly_white', color='Importância', color_continuous_scale='Blues')
                 fig_imp.update_layout(showlegend=False, coloraxis_showscale=False, height=380)
                 st.plotly_chart(fig_imp, use_container_width=True)
-
-            # Diagnóstico textual
-            sugest = gerar_sugestao(row_ia, row_ia.get('wmape_melhor'))
             st.markdown("**💡 Diagnóstico e Sugestão:**")
-            st.markdown(sugest)
+            st.markdown(gerar_sugestao(row_ia, row_ia.get('wmape_melhor')))
 
-        # Tabela geral
         st.divider()
         st.markdown("### 📊 Resumo IA — Todos os SKUs")
-
         df_ia_show = df_ia.copy()
-        df_ia_show['wmape_melhor'] = (df_ia_show['wmape_melhor'] * 100).round(1).astype(str) + '%'
-        df_ia_show['wmape_ia_insample'] = df_ia_show['wmape_ia_insample'].apply(
-            lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—"
-        )
+        df_ia_show['wmape_melhor']      = (df_ia_show['wmape_melhor'] * 100).round(1).astype(str) + '%'
+        df_ia_show['wmape_ia_insample'] = df_ia_show['wmape_ia_insample'].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—")
+        st.dataframe(df_ia_show.rename(columns={'sku':'SKU','classificacao':'Classificação','tendencia':'Tendência','media_historica':'Média Hist.','cv':'CV','previsao_estatistica':'Prev. Estatística','previsao_ia':'Prev. IA','previsao_combinada':'Prev. Combinada','melhor_metodo':'Melhor Método','wmape_melhor':'WMAPE','wmape_ia_insample':'WMAPE IA (in-sample)'}), use_container_width=True, hide_index=True)
 
-        df_ia_renamed = df_ia_show.rename(columns={
-            'sku':                  'SKU',
-            'classificacao':        'Classificação',
-            'tendencia':            'Tendência',
-            'media_historica':      'Média Hist.',
-            'cv':                   'CV',
-            'previsao_estatistica': 'Prev. Estatística',
-            'previsao_ia':          'Prev. IA',
-            'previsao_combinada':   'Prev. Combinada',
-            'melhor_metodo':        'Melhor Método',
-            'wmape_melhor':         'WMAPE',
-            'wmape_ia_insample':    'WMAPE IA (in-sample)',
-        })
-        st.dataframe(df_ia_renamed, use_container_width=True, hide_index=True)
-        # Export estilizado com valores numéricos reais
-        df_ia_exp = df_ia.rename(columns={
-            'sku':'SKU','classificacao':'Classificação','tendencia':'Tendência',
-            'media_historica':'Média Hist.','cv':'CV',
-            'previsao_estatistica':'Prev. Estatística','previsao_ia':'Prev. IA',
-            'previsao_combinada':'Prev. Combinada','melhor_metodo':'Melhor Método',
-            'wmape_melhor':'WMAPE','wmape_ia_insample':'WMAPE IA (in-sample)',
-        }).copy()
-        buf_ia = exportar_excel_visual({
-            'Resumo_IA_Todos_SKUs': {
-                'df': df_ia_exp,
-                'col_wmape': 'WMAPE',
-                'col_metodo': 'Melhor Método',
-                'col_widths': {'SKU':14,'Classificação':16,'Tendência':18,'Média Hist.':14,
-                               'CV':10,'Prev. Estatística':18,'Prev. IA':14,
-                               'Prev. Combinada':16,'Melhor Método':18,
-                               'WMAPE':14,'WMAPE IA (in-sample)':22},
-            }
-        })
-        st.download_button(
-            "📥 Exportar Resumo IA — Todos os SKUs (.xlsx)",
-            data=buf_ia,
-            file_name=f"resumo_ia_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        buf_ia = exportar_excel_visual({'Resumo_IA_Todos_SKUs': {'df': df_ia.rename(columns={'sku':'SKU','classificacao':'Classificação','tendencia':'Tendência','media_historica':'Média Hist.','cv':'CV','previsao_estatistica':'Prev. Estatística','previsao_ia':'Prev. IA','previsao_combinada':'Prev. Combinada','melhor_metodo':'Melhor Método','wmape_melhor':'WMAPE','wmape_ia_insample':'WMAPE IA (in-sample)'}), 'col_wmape':'WMAPE','col_metodo':'Melhor Método','col_widths':{'SKU':14,'Classificação':16,'Tendência':18,'Média Hist.':14,'CV':10,'Prev. Estatística':18,'Prev. IA':14,'Prev. Combinada':16,'Melhor Método':18,'WMAPE':14,'WMAPE IA (in-sample)':22}}})
+        st.download_button("📥 Exportar Resumo IA (.xlsx)", data=buf_ia, file_name=f"resumo_ia_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         # ── PAINEL IA OUT-OF-SAMPLE ──────────────────────────
         st.divider()
         st.markdown("### 🔬 IA Out-of-Sample — Calibração do Peso por SKU")
 
         df_oos = st.session_state.get('df_oos')
+        _oos_seg_label = st.session_state.get('_oos_segmentacao', None)
 
         if df_oos is None:
-            st.info(
-                "O WMAPE Out-of-Sample da IA ainda não foi calculado. "
-                "Clique em **🔬 IA Out-of-Sample** na barra lateral para iniciar. "
-                "Tempo estimado: **2 a 8 minutos** (75 SKUs selecionados)."
-            )
+            # ── Flag de segmentação configurada (ainda não rodou) ──
+            _classes_cfg = st.session_state.get('classes_selecionadas_oos', [])
+            _df_meta_tab = st.session_state.get('df_sku_meta', pd.DataFrame())
+            if _classes_cfg and not _df_meta_tab.empty and 'classe' in _df_meta_tab.columns:
+                _cls_codes_tab = [c.split(' — ')[0].strip() for c in _classes_cfg]
+                _n_skus_tab = _df_meta_tab[_df_meta_tab['classe'].astype(str).isin(_cls_codes_tab)]['sku'].nunique()
+                st.markdown(
+                    f'<div class="seg-flag">🎯 Segmentação configurada: '
+                    f'{len(_classes_cfg)} classe(s) → {_n_skus_tab} SKUs serão avaliados</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    '<div class="seg-flag" style="background:linear-gradient(90deg,#64748B,#94A3B8);">'
+                    '🔍 Sem segmentação — todos os SKUs elegíveis serão avaliados</div>',
+                    unsafe_allow_html=True
+                )
+            st.info("Clique em **🔬 IA Out-of-Sample** na barra lateral para iniciar. Tempo varia conforme o número de SKUs.")
             with st.expander("Por que isso importa?"):
                 st.markdown(
                     "**O problema do in-sample:** o modelo treinou nos mesmos dados que avaliou — resultado otimista.\n\n"
-                    "**O out-of-sample:** re-treina a IA excluindo os períodos de teste, gerando um WMAPE honesto e comparável ao backtesting estatístico.\n\n"
-                    "**Resultado prático:** você saberá exatamente qual peso usar no slider para cada SKU, em vez de um valor global arbitrário."
+                    "**O out-of-sample:** re-treina a IA excluindo os períodos de teste — WMAPE honesto e comparável ao backtesting estatístico.\n\n"
+                    "**O filtro de classe:** selecione as classes de material na sidebar para restringir a avaliação aos SKUs relevantes, reduzindo o tempo de processamento.\n\n"
+                    "**Resultado prático:** peso automático calibrado por SKU (0%, 50% ou 70%) em vez de um valor global arbitrário."
                 )
         else:
+            # ── Flag de segmentação usada ──────────────────────
+            if _oos_seg_label:
+                st.markdown(
+                    f'<div class="seg-flag">🎯 OOS calculado com segmentação: <b>{_oos_seg_label}</b></div>',
+                    unsafe_allow_html=True
+                )
+
             _det_oos = st.session_state.get('_det_oos', {})
-            df_oos_val = df_oos.dropna(subset=['wmape_ia_oos', 'wmape_stat_oos'])
+            df_oos_val = df_oos.dropna(subset=['wmape_ia_oos','wmape_stat_oos'])
             n_ia_wins   = int((df_oos_val['wmape_ia_oos'] < df_oos_val['wmape_stat_oos']).sum())
             n_stat_wins = int(len(df_oos_val) - n_ia_wins)
             n_sem_dados = int(df_oos['wmape_ia_oos'].isna().sum())
 
-            # Badge de status do peso automático
             _pesos_ativos = st.session_state.get('peso_por_sku', {})
             _n_auto = len(_pesos_ativos)
             if _n_auto > 0:
-                st.success(
-                    f"✅ **Peso automático ativo** para **{_n_auto} SKUs**. "
-                    f"A Prev. Combinada já está usando os pesos calibrados pelo OOS. "
-                    f"O slider global é usado apenas como fallback para os demais SKUs."
-                )
-            else:
-                st.info("ℹ️ Pesos automáticos ainda não aplicados — rode o pipeline novamente para atualizar a Prev. Combinada com os pesos do OOS.")
+                st.success(f"✅ **Peso automático ativo** para **{_n_auto} SKUs**. Previsão Combinada já usa pesos calibrados pelo OOS.")
 
             oc1, oc2, oc3, oc4 = st.columns(4)
-            oc1.metric("SKUs avaliados",           len(df_oos_val))
-            oc2.metric("IA vence estatístico",     n_ia_wins,
-                       help="Peso IA = 70% nestes SKUs")
-            oc3.metric("Estatístico vence IA",     n_stat_wins,
-                       help="Peso IA = 0% nestes SKUs — 100% estatístico")
-            oc4.metric("Série curta (excluídos)",  n_sem_dados)
+            oc1.metric("SKUs avaliados", len(df_oos_val))
+            oc2.metric("IA vence estatístico", n_ia_wins, help="Peso IA = 70%")
+            oc3.metric("Estatístico vence IA", n_stat_wins, help="Peso IA = 0%")
+            oc4.metric("Série curta (excluídos)", n_sem_dados)
 
-            _f_rec = st.selectbox(
-                "Filtrar por recomendação",
-                options=["Todos", "IA é mais confiável", "Estatístico é mais confiável", "Desempenho similar"],
-                key="oos_filter_rec"
-            )
+            _f_rec = st.selectbox("Filtrar por recomendação", options=["Todos","IA é mais confiável","Estatístico é mais confiável","Desempenho similar"], key="oos_filter_rec")
             df_oos_show = df_oos_val.copy()
             if _f_rec == "IA é mais confiável":
                 df_oos_show = df_oos_show[df_oos_show['wmape_ia_oos'] < df_oos_show['wmape_stat_oos']]
@@ -1988,259 +1474,102 @@ def main():
             elif _f_rec == "Desempenho similar":
                 df_oos_show = df_oos_show[df_oos_show['recomendacao'].str.contains("similar", na=False)]
 
-            df_oos_display = df_oos_show.rename(columns={
-                'sku':                   'SKU',
-                'melhor_metodo':         'Melhor Método',
-                'wmape_melhor':          'WMAPE BT',
-                'wmape_ia_oos':          'WMAPE IA (OOS)',
-                'wmape_stat_oos':        'WMAPE Estat. (OOS)',
-                'recomendacao':          'Recomendação',
-                'peso_ia_pct':           'Peso IA Automático',
-            }).copy()
-            for cp in ['WMAPE BT', 'WMAPE IA (OOS)', 'WMAPE Estat. (OOS)']:
+            df_oos_display = df_oos_show.rename(columns={'sku':'SKU','melhor_metodo':'Melhor Método','wmape_melhor':'WMAPE BT','wmape_ia_oos':'WMAPE IA (OOS)','wmape_stat_oos':'WMAPE Estat. (OOS)','recomendacao':'Recomendação','peso_ia_pct':'Peso IA Automático'}).copy()
+            for cp in ['WMAPE BT','WMAPE IA (OOS)','WMAPE Estat. (OOS)']:
                 if cp in df_oos_display.columns:
-                    df_oos_display[cp] = df_oos_display[cp].apply(
-                        lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—"
-                    )
+                    df_oos_display[cp] = df_oos_display[cp].apply(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "—")
             st.dataframe(df_oos_display, use_container_width=True, hide_index=True)
             st.caption(f"{len(df_oos_show)} SKUs exibidos")
 
             if len(df_oos_val) > 0:
-                # Limitar escala ao percentil 95 para não deixar outliers comprimir os pontos
-                _p95 = float(np.percentile(
-                    pd.concat([df_oos_val['wmape_stat_oos'], df_oos_val['wmape_ia_oos']]).dropna(),
-                    95
-                ))
+                _p95 = float(np.percentile(pd.concat([df_oos_val['wmape_stat_oos'],df_oos_val['wmape_ia_oos']]).dropna(), 95))
                 _axis_max = round(_p95 * 1.15, 2)
-
-                # Marcar outliers acima do limite
                 df_oos_plot = df_oos_val.copy()
                 df_oos_plot['_x'] = df_oos_plot['wmape_stat_oos'].clip(upper=_axis_max)
                 df_oos_plot['_y'] = df_oos_plot['wmape_ia_oos'].clip(upper=_axis_max)
-                df_oos_plot['_outlier'] = (
-                    (df_oos_val['wmape_stat_oos'] > _axis_max) |
-                    (df_oos_val['wmape_ia_oos']   > _axis_max)
-                )
-
-                # Mapa de cores e labels limpos
-                color_map = {
-                    '✅ IA é mais confiável — aumente o peso no slider':      '#22C55E',
-                    '⚠️ Método estatístico é mais confiável — reduza o peso da IA': '#EF4444',
-                    '➡️ Desempenho similar — peso 50/50 é adequado':          '#F59E0B',
-                }
-                label_map = {
-                    '✅ IA é mais confiável — aumente o peso no slider':      '✅ IA melhor',
-                    '⚠️ Método estatístico é mais confiável — reduza o peso da IA': '⚠️ Estatístico melhor',
-                    '➡️ Desempenho similar — peso 50/50 é adequado':          '➡️ Similar',
-                }
+                df_oos_plot['_outlier'] = ((df_oos_val['wmape_stat_oos'] > _axis_max) | (df_oos_val['wmape_ia_oos'] > _axis_max))
+                color_map  = {'✅ IA é mais confiável — aumente o peso no slider':'#22C55E','⚠️ Método estatístico é mais confiável — reduza o peso da IA':'#EF4444','➡️ Desempenho similar — peso 50/50 é adequado':'#F59E0B'}
+                label_map  = {'✅ IA é mais confiável — aumente o peso no slider':'✅ IA melhor','⚠️ Método estatístico é mais confiável — reduza o peso da IA':'⚠️ Estatístico melhor','➡️ Desempenho similar — peso 50/50 é adequado':'➡️ Similar'}
                 df_oos_plot['_label'] = df_oos_plot['recomendacao'].map(label_map).fillna('—')
-
-                fig_oos = px.scatter(
-                    df_oos_plot,
-                    x='_x', y='_y',
-                    color='_label',
-                    color_discrete_map={v: color_map.get(k, '#94A3B8')
-                                        for k, v in label_map.items()},
-                    hover_data={'sku': True, 'melhor_metodo': True,
-                                'wmape_stat_oos': ':.1%', 'wmape_ia_oos': ':.1%',
-                                '_x': False, '_y': False, '_label': False,
-                                '_outlier': False, 'recomendacao': False},
-                    title='WMAPE Out-of-Sample: IA vs Melhor Método Estatístico',
-                    labels={'_x': 'WMAPE Estatístico OOS (%)',
-                            '_y': 'WMAPE IA OOS (%)',
-                            '_label': 'Recomendação'},
-                    template='plotly_white', height=420,
-                )
-                # Linha de igualdade (IA = Estatístico)
-                fig_oos.add_shape(type='line', x0=0, y0=0,
-                                  x1=_axis_max, y1=_axis_max,
-                                  line=dict(dash='dash', color='#94A3B8', width=1.5))
-                # Rótulos dos eixos em %
-                fig_oos.update_xaxes(
-                    tickformat='.0%', range=[0, _axis_max],
-                    title_text='WMAPE Estatístico OOS'
-                )
-                fig_oos.update_yaxes(
-                    tickformat='.0%', range=[0, _axis_max],
-                    title_text='WMAPE IA OOS'
-                )
-                # Anotações das regiões
-                fig_oos.add_annotation(
-                    x=_axis_max * 0.25, y=_axis_max * 0.75,
-                    text="IA pior<br>(acima da linha)",
-                    showarrow=False, font=dict(size=10, color='#EF4444'),
-                    bgcolor='rgba(255,255,255,0.7)'
-                )
-                fig_oos.add_annotation(
-                    x=_axis_max * 0.75, y=_axis_max * 0.22,
-                    text="IA melhor<br>(abaixo da linha)",
-                    showarrow=False, font=dict(size=10, color='#22C55E'),
-                    bgcolor='rgba(255,255,255,0.7)'
-                )
-                # Nota sobre outliers cortados
+                fig_oos = px.scatter(df_oos_plot, x='_x', y='_y', color='_label', color_discrete_map={v:color_map.get(k,'#94A3B8') for k,v in label_map.items()},
+                                     hover_data={'sku':True,'melhor_metodo':True,'wmape_stat_oos':':.1%','wmape_ia_oos':':.1%','_x':False,'_y':False,'_label':False,'_outlier':False,'recomendacao':False},
+                                     title='WMAPE Out-of-Sample: IA vs Melhor Método Estatístico', labels={'_x':'WMAPE Estatístico OOS','_y':'WMAPE IA OOS','_label':'Recomendação'}, template='plotly_white', height=420)
+                fig_oos.add_shape(type='line', x0=0, y0=0, x1=_axis_max, y1=_axis_max, line=dict(dash='dash', color='#94A3B8', width=1.5))
+                fig_oos.update_xaxes(tickformat='.0%', range=[0,_axis_max])
+                fig_oos.update_yaxes(tickformat='.0%', range=[0,_axis_max])
+                fig_oos.add_annotation(x=_axis_max*0.25, y=_axis_max*0.75, text="IA pior<br>(acima da linha)", showarrow=False, font=dict(size=10,color='#EF4444'), bgcolor='rgba(255,255,255,0.7)')
+                fig_oos.add_annotation(x=_axis_max*0.75, y=_axis_max*0.22, text="IA melhor<br>(abaixo da linha)", showarrow=False, font=dict(size=10,color='#22C55E'), bgcolor='rgba(255,255,255,0.7)')
                 n_out = int(df_oos_plot['_outlier'].sum())
                 if n_out > 0:
-                    fig_oos.add_annotation(
-                        xref='paper', yref='paper', x=1, y=1,
-                        text=f"{n_out} SKU(s) fora da escala (>{ _axis_max:.0%}) não exibidos",
-                        showarrow=False, font=dict(size=9, color='#94A3B8'),
-                        xanchor='right', yanchor='top'
-                    )
-                fig_oos.update_layout(
-                    legend=dict(
-                        title='', orientation='h',
-                        yanchor='bottom', y=-0.25,
-                        xanchor='center', x=0.5
-                    ),
-                    margin=dict(l=60, r=20, t=50, b=80)
-                )
+                    fig_oos.add_annotation(xref='paper',yref='paper',x=1,y=1, text=f"{n_out} SKU(s) fora da escala (>{_axis_max:.0%})", showarrow=False, font=dict(size=9,color='#94A3B8'), xanchor='right', yanchor='top')
+                fig_oos.update_layout(legend=dict(title='',orientation='h',yanchor='bottom',y=-0.25,xanchor='center',x=0.5), margin=dict(l=60,r=20,t=50,b=80))
                 st.plotly_chart(fig_oos, use_container_width=True, key="scatter_oos")
 
-            buf_oos = exportar_excel_visual({
-                'IA_OutofSample': {
-                    'df': df_oos_display.reset_index(drop=True),
-                    'col_wmape': 'WMAPE IA (OOS)',
-                    'col_metodo': 'Melhor Método',
-                    'col_widths': {
-                        'SKU': 14, 'Melhor Método': 18, 'WMAPE BT': 14,
-                        'WMAPE IA (OOS)': 18, 'WMAPE Estat. (OOS)': 20,
-                        'Recomendação de Peso': 35,
-                    },
-                }
-            })
-            st.download_button(
-                "📥 Exportar IA Out-of-Sample (.xlsx)", data=buf_oos,
-                file_name=f"ia_oos_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            buf_oos = exportar_excel_visual({'IA_OutofSample': {'df': df_oos_display.reset_index(drop=True), 'col_wmape':'WMAPE IA (OOS)','col_metodo':'Melhor Método','col_widths':{'SKU':14,'Melhor Método':18,'WMAPE BT':14,'WMAPE IA (OOS)':18,'WMAPE Estat. (OOS)':20,'Recomendação':35}}})
+            st.download_button("📥 Exportar IA Out-of-Sample (.xlsx)", data=buf_oos, file_name=f"ia_oos_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # ── TABELA HORIZONTE 3 MESES ─────────────────────────
+        # ── HORIZONTE 3 MESES ────────────────────────────────
         st.divider()
         st.markdown("### 📅 Previsão Horizonte 3 Meses — Todos os SKUs")
-        st.markdown("Previsão para os **próximos 3 meses** (M+1, M+2, M+3) a partir do último período fechado na base, "
-                    "usando o modelo combinado IA + melhor método estatístico.")
-
         if df_ia is not None and col_periodo and col_ano:
-            meses_ord2 = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,
-                          'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
-            meses_nome = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',
-                          7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
-
-            # Usar data REAL do sistema para M+1, M+2, M+3 (automático)
-            # O mês vigente (hoje) é o mês base — as previsões são os 3 seguintes
+            meses_ord2 = {'jan':1,'fev':2,'mar':3,'abr':4,'mai':5,'jun':6,'jul':7,'ago':8,'set':9,'out':10,'nov':11,'dez':12}
+            meses_nome = {1:'jan',2:'fev',3:'mar',4:'abr',5:'mai',6:'jun',7:'jul',8:'ago',9:'set',10:'out',11:'nov',12:'dez'}
             _hoje = datetime.date.today()
-            mes_atual_real  = _hoje.month    # mês de hoje (ex: maio = 5)
-            ano_atual_real  = _hoje.year
-
-            # Descobrir último período fechado na base (para informação)
+            mes_atual_real = _hoje.month
+            ano_atual_real = _hoje.year
             df_ult = df_base[[col_ano, col_periodo]].copy()
             df_ult['_mes_num'] = df_ult[col_periodo].astype(str).str.lower().str[:3].map(meses_ord2).fillna(0).astype(int)
             df_ult['_ano_int'] = pd.to_numeric(df_ult[col_ano], errors='coerce').fillna(0).astype(int)
             df_ult = df_ult.sort_values(['_ano_int','_mes_num'])
             ultimo_ano = int(df_ult['_ano_int'].max())
             ultimo_mes = int(df_ult[df_ult['_ano_int'] == ultimo_ano]['_mes_num'].max())
-
-            # M+1, M+2, M+3 em relação ao mês vigente real
             proximos = []
             for h_step in range(1, 4):
                 m = (mes_atual_real - 1 + h_step) % 12 + 1
                 a = ano_atual_real + ((mes_atual_real - 1 + h_step) // 12)
                 proximos.append((a, meses_nome[m], f"{meses_nome[m]}/{str(a)[-2:]}"))
+            st.info(f"📌 Mês vigente: **{meses_nome[mes_atual_real]}/{ano_atual_real}** | Último período fechado na base: **{meses_nome[ultimo_mes]}/{ultimo_ano}** → Previsões: **{' · '.join(p[2] for p in proximos)}**")
 
-            st.info(
-                f"📌 Mês vigente: **{meses_nome[mes_atual_real]}/{ano_atual_real}** "
-                f"| Último período fechado na base: **{meses_nome[ultimo_mes]}/{ultimo_ano}** → "
-                f"Previsões M+1/M+2/M+3: **{' · '.join(p[2] for p in proximos)}**"
-            )
-
-            # Calcular previsões para cada SKU × 3 horizontes
             rows_h = []
             skus_h = df_base[col_sku].unique()
             prog_h = st.progress(0, text="Calculando horizonte...")
-
             for idx_h, sku in enumerate(skus_h):
                 serie_h = df_base[df_base[col_sku] == sku][col_demanda].reset_index(drop=True).astype(float)
-
-                # IA
                 model_h = treinar_ia(serie_h)
-
                 row_h = {'SKU': sku}
-
-                # Buscar melhor método estatístico do backtesting
                 if df_bt is not None:
                     rb_h = df_bt[df_bt['sku'] == sku]
                     melhor_h = rb_h.iloc[0]['melhor_metodo'] if len(rb_h) > 0 else 'MA-3'
                 else:
                     melhor_h = 'MA-3'
-
                 fn_h = METODOS[melhor_h]
-
-                # Previsões h=1,2,3
-                try:
-                    preds_stat_h = fn_h(serie_h, h=3)
-                except:
-                    preds_stat_h = [float(serie_h.mean())] * 3
-
-                # Rolling forecast IA para todos os passos de uma vez
+                try:   preds_stat_h = fn_h(serie_h, h=3)
+                except: preds_stat_h = [float(serie_h.mean())] * 3
                 preds_ia_h = prever_ia_multistep(model_h, serie_h, h=3)
-
                 for step, (ano_h, mes_h, lbl_h) in enumerate(proximos):
                     pred_stat_step = preds_stat_h[step] if step < len(preds_stat_h) else preds_stat_h[-1]
                     pred_ia_step   = preds_ia_h[step] if (preds_ia_h[step] is not None) else pred_stat_step
-
-                    # Peso da IA — automático por SKU (OOS) ou slider global (fallback)
-                    _pesos_oos_h  = st.session_state.get('peso_por_sku', {})
-                    _peso_h       = _pesos_oos_h.get(sku, _pesos_oos_h.get(float(sku), None))
-                    _peso_ef_h    = _peso_h if _peso_h is not None else peso_ia
-                    pred_comb_step = _peso_ef_h * pred_ia_step + (1 - _peso_ef_h) * pred_stat_step
-                    row_h[f'Prev {lbl_h}'] = round(max(0.0, pred_comb_step), 1)
-
+                    _pesos_oos_h   = st.session_state.get('peso_por_sku', {})
+                    _peso_h        = _pesos_oos_h.get(sku, _pesos_oos_h.get(float(sku), None))
+                    _peso_ef_h     = _peso_h if _peso_h is not None else peso_ia
+                    row_h[f'Prev {lbl_h}'] = round(max(0.0, _peso_ef_h * pred_ia_step + (1 - _peso_ef_h) * pred_stat_step), 1)
                 row_h['Método Base'] = melhor_h
                 rows_h.append(row_h)
                 prog_h.progress((idx_h+1)/len(skus_h))
 
             prog_h.empty()
             df_horizonte = pd.DataFrame(rows_h)
-
-            # Filtro de SKU
-            skus_busca = st.text_input("🔍 Filtrar SKU (deixe vazio para ver todos)",
-                                        key='horizonte_sku_filter')
-            if skus_busca.strip():
-                df_horizonte_show = df_horizonte[
-                    df_horizonte['SKU'].astype(str).str.contains(skus_busca.strip())
-                ]
-            else:
-                df_horizonte_show = df_horizonte
-
+            skus_busca = st.text_input("🔍 Filtrar SKU", key='horizonte_sku_filter')
+            df_horizonte_show = df_horizonte[df_horizonte['SKU'].astype(str).str.contains(skus_busca.strip())] if skus_busca.strip() else df_horizonte
             st.dataframe(df_horizonte_show, use_container_width=True, hide_index=True)
-
-            # Totais — respeitam o filtro de SKU aplicado
             n_skus_filtro = len(df_horizonte_show)
-            n_skus_total  = len(df_horizonte)
-            filtro_ativo  = skus_busca.strip() != ""
-            label_filtro  = f" ({n_skus_filtro} SKUs filtrados)" if filtro_ativo else f" ({n_skus_total} SKUs)"
-            st.markdown(f"**Totais por mês{label_filtro}:**")
             tot_cols = st.columns(3)
             for i, (_, _, lbl_h) in enumerate(proximos):
                 col_name = f'Prev {lbl_h}'
                 if col_name in df_horizonte_show.columns:
                     tot_cols[i].metric(lbl_h, f"{df_horizonte_show[col_name].sum():,.0f}")
-
-            # Download estilizado
-            buf_hz = exportar_excel_visual({
-                'Horizonte_3_Meses': {
-                    'df': df_horizonte_show,
-                    'col_metodo': 'Método Base',
-                    'col_widths': {'SKU':14,'Método Base':18,
-                                   **{f'Prev {p[2]}':16 for p in proximos}},
-                }
-            })
-            st.download_button(
-                "📥 Exportar Horizonte 3 Meses (.xlsx)",
-                data=buf_hz,
-                file_name=f"horizonte_3meses_{meses_nome[mes_atual_real]}_{ano_atual_real}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            buf_hz = exportar_excel_visual({'Horizonte_3_Meses': {'df': df_horizonte_show, 'col_metodo':'Método Base', 'col_widths': {'SKU':14,'Método Base':18, **{f'Prev {p[2]}':16 for p in proximos}}}})
+            st.download_button("📥 Exportar Horizonte 3 Meses (.xlsx)", data=buf_hz, file_name=f"horizonte_3meses_{meses_nome[mes_atual_real]}_{ano_atual_real}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         else:
             st.info("Rode o pipeline completo para visualizar as previsões de horizonte.")
 
@@ -2249,121 +1578,72 @@ def main():
     # ─────────────────────────────────────────────────────────
     with tab5:
         st.subheader("📋 Informativo Automático — Top 10 SKUs com Maior WMAPE")
-
         if df_ia is None or df_bt is None:
             st.info("👆 Clique em **🚀 Rodar Pipeline Completo** na barra lateral para iniciar.")
             st.stop()
 
-        # ── Filtro de período histórico ──────────────────────────
-        # ── Calcular ambas as janelas simultaneamente (cacheado) ──
         _base_hash = str(len(df_base)) + str(df_base[col_demanda].sum()) if col_periodo and col_ano else ""
 
         def _build_top10(n_meses, col_prefix):
-            """Monta o dataframe top10 para uma janela de n_meses."""
             if col_periodo and col_ano:
-                _wmap, _nreg, _MIN_R, _ = calcular_wmape_janela(
-                    _base_hash, df_base, col_sku, col_periodo,
-                    col_ano, col_demanda, df_ia, df_bt, n_meses
-                )
+                _wmap, _nreg, _MIN_R, _ = calcular_wmape_janela(_base_hash, df_base, col_sku, col_periodo, col_ano, col_demanda, df_ia, df_bt, n_meses)
                 _df = df_ia.copy()
                 _df["wmape_janela"] = _df["sku"].map(_wmap)
-                _df = _df.dropna(subset=["wmape_janela"])
-                _df = _df.sort_values("wmape_janela", ascending=False).head(10).reset_index(drop=True)
+                _df = _df.dropna(subset=["wmape_janela"]).sort_values("wmape_janela", ascending=False).head(10).reset_index(drop=True)
                 _df["wmape_pct"] = (_df["wmape_janela"] * 100).round(1)
             else:
-                _MIN_R = 3
                 _df = df_ia.dropna(subset=["wmape_melhor"]).sort_values("wmape_melhor", ascending=False).head(10).reset_index(drop=True).copy()
                 _df["wmape_pct"] = (_df["wmape_melhor"] * 100).round(1)
             _df = _df.dropna(subset=["wmape_pct"]).reset_index(drop=True)
             _df["sku_str"] = "SKU " + _df["sku"].astype(str)
-            _df["sugestao"] = _df.apply(
-                lambda r: gerar_sugestao(
-                    r.to_dict(),
-                    r["wmape_janela"] if "wmape_janela" in r.index and pd.notna(r.get("wmape_janela")) else r.get("wmape_melhor", np.nan)
-                ), axis=1
-            )
+            _df["sugestao"] = _df.apply(lambda r: gerar_sugestao(r.to_dict(), r["wmape_janela"] if "wmape_janela" in r.index and pd.notna(r.get("wmape_janela")) else r.get("wmape_melhor", np.nan)), axis=1)
             return _df
 
         def _render_panel(df_t, janela_label, col_prefix, col_container):
-            """Renderiza gráfico + detalhamento para um painel."""
             with col_container:
                 st.markdown(f"#### 📋 Top 10 — Últimos **{janela_label}**")
-                n_elig = len(df_ia) if df_ia is not None else 0
-                st.caption(f"{len(df_t)} SKUs exibidos | {n_elig} SKUs elegíveis")
-
+                st.caption(f"{len(df_t)} SKUs exibidos")
                 if len(df_t) == 0:
                     st.info("Nenhum SKU com dados suficientes nesta janela.")
                     return
-
-                # Gráfico de barras
                 df_plot = df_t.sort_values("wmape_pct").copy()
-                fig = px.bar(
-                    df_plot,
-                    x="wmape_pct", y="sku_str", orientation="h",
-                    color="wmape_pct", color_continuous_scale="RdYlGn_r",
-                    template="plotly_white",
-                    labels={"wmape_pct": "WMAPE (%)", "sku_str": "SKU"},
-                    text="wmape_pct",
-                    category_orders={"sku_str": df_plot["sku_str"].tolist()}
-                )
+                fig = px.bar(df_plot, x="wmape_pct", y="sku_str", orientation="h", color="wmape_pct",
+                             color_continuous_scale="RdYlGn_r", template="plotly_white",
+                             labels={"wmape_pct":"WMAPE (%)","sku_str":"SKU"}, text="wmape_pct",
+                             category_orders={"sku_str": df_plot["sku_str"].tolist()})
                 fig.update_traces(texttemplate="%{text:.1f}%", textposition="inside")
-                fig.update_layout(
-                    showlegend=False, coloraxis_showscale=False, height=360,
-                    yaxis=dict(type="category"),
-                    margin=dict(l=10, r=10, t=10, b=10)
-                )
+                fig.update_layout(showlegend=False, coloraxis_showscale=False, height=360, yaxis=dict(type="category"), margin=dict(l=10,r=10,t=10,b=10))
                 st.plotly_chart(fig, use_container_width=True, key=f"bar_{col_prefix}")
-
                 st.markdown("**Detalhamento por SKU:**")
                 for i, row in enumerate(df_t.itertuples()):
                     wmape_color = cor_wmape(row.wmape_melhor)
-                    badge = (f'<span style="background:{wmape_color};color:white;'
-                             f'padding:2px 8px;border-radius:8px;font-size:12px">'
-                             f'{row.wmape_pct:.1f}%</span>')
-                    with st.expander(
-                        f"#{i+1} SKU: {row.sku} | {row.wmape_pct:.1f}% | {row.classificacao}",
-                        expanded=(i < 2)
-                    ):
+                    badge = f'<span style="background:{wmape_color};color:white;padding:2px 8px;border-radius:8px;font-size:12px">{row.wmape_pct:.1f}%</span>'
+                    with st.expander(f"#{i+1} SKU: {row.sku} | {row.wmape_pct:.1f}% | {row.classificacao}", expanded=(i < 2)):
                         st.markdown(badge, unsafe_allow_html=True)
                         c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Classificação",  row.classificacao)
-                        c2.metric("Tendência",       row.tendencia.split(" ")[-1] if " " in str(row.tendencia) else row.tendencia)
+                        c1.metric("Classificação", row.classificacao)
+                        c2.metric("Tendência", row.tendencia.split(" ")[-1] if " " in str(row.tendencia) else row.tendencia)
                         c3.metric("Prev. Combinada", f"{row.previsao_combinada:.1f}")
-                        c4.metric("Melhor Método",   row.melhor_metodo)
-
-                        # Mini gráfico
+                        c4.metric("Melhor Método", row.melhor_metodo)
                         _df_mini = df_base[df_base[col_sku] == row.sku].copy()
                         if col_periodo and col_ano:
-                            _mord2 = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,
-                                      "jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+                            _mord2 = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,"jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
                             _df_mini["_mn"] = _df_mini[col_periodo].astype(str).str.lower().str[:3].map(_mord2).fillna(0)
                             _df_mini["_an"] = pd.to_numeric(_df_mini[col_ano], errors="coerce").fillna(0)
                             _df_mini = _df_mini.sort_values(["_an","_mn"])
-                            x_mini = [f"{str(r2[col_periodo]).lower()[:3]}/{str(int(r2[col_ano]))[-2:]}"
-                                      for _, r2 in _df_mini.iterrows()]
+                            x_mini = [f"{str(r2[col_periodo]).lower()[:3]}/{str(int(r2[col_ano]))[-2:]}" for _, r2 in _df_mini.iterrows()]
                             s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
                         else:
                             s_mini = _df_mini[col_demanda].reset_index(drop=True).astype(float)
                             x_mini = list(range(len(s_mini)))
-
                         fig_m = go.Figure()
-                        fig_m.add_trace(go.Scatter(
-                            x=x_mini, y=s_mini.values, mode="lines+markers",
-                            line=dict(color=wmape_color, width=2), marker=dict(size=4)
-                        ))
-                        fig_m.add_hline(y=s_mini.mean(), line_dash="dash",
-                                        line_color="gray", annotation_text="Média")
-                        fig_m.update_layout(
-                            height=160, template="plotly_white", showlegend=False,
-                            margin=dict(l=10, r=10, t=10, b=10),
-                            xaxis=dict(tickangle=-45, tickfont=dict(size=8))
-                        )
-                        st.plotly_chart(fig_m, use_container_width=True,
-                                        key=f"mini_{col_prefix}_{i}_{row.sku}")
+                        fig_m.add_trace(go.Scatter(x=x_mini, y=s_mini.values, mode="lines+markers", line=dict(color=wmape_color, width=2), marker=dict(size=4)))
+                        fig_m.add_hline(y=s_mini.mean(), line_dash="dash", line_color="gray", annotation_text="Média")
+                        fig_m.update_layout(height=160, template="plotly_white", showlegend=False, margin=dict(l=10,r=10,t=10,b=10), xaxis=dict(tickangle=-45, tickfont=dict(size=8)))
+                        st.plotly_chart(fig_m, use_container_width=True, key=f"mini_{col_prefix}_{i}_{row.sku}")
                         st.markdown(f"💡 **Sugestão IA:** {row.sugestao}")
 
-        # ── Renderizar os dois painéis lado a lado ──────────
-        with st.spinner("Calculando Top 10 — janelas 12 e 6 meses..."):
+        with st.spinner("Calculando Top 10..."):
             df_12 = _build_top10(12, "12m")
             df_6  = _build_top10(6,  "6m")
 
@@ -2371,257 +1651,115 @@ def main():
         _render_panel(df_12, "12 Meses", "12m", col_12)
         _render_panel(df_6,  "6 Meses",  "6m",  col_6)
 
-        # ── Exportação (usa a janela de 12 meses como base) ──
         st.divider()
         st.markdown("### 💾 Exportar Resultados")
         col_exp1, col_exp2 = st.columns(2)
         with col_exp1:
-            buf = exportar_excel(df_bt, df_ia, df_12[["sku","wmape_pct","melhor_metodo",
-                                                        "classificacao","tendencia",
-                                                        "previsao_estatistica","previsao_ia",
-                                                        "previsao_combinada","sugestao"]])
-            data_hoje = datetime.date.today().strftime("%d_%m_%Y")
-            st.download_button(
-                label="📥 Baixar Relatório Excel Completo",
-                data=buf,
-                file_name=f"forecast_v5_{data_hoje}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
+            buf = exportar_excel(df_bt, df_ia, df_12[["sku","wmape_pct","melhor_metodo","classificacao","tendencia","previsao_estatistica","previsao_ia","previsao_combinada","sugestao"]])
+            st.download_button(label="📥 Baixar Relatório Excel Completo", data=buf, file_name=f"forecast_sonar_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
         with col_exp2:
-            csv_buf = df_ia.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                label="📥 Baixar Tabela IA (.csv)",
-                data=csv_buf,
-                file_name=f"sugestoes_ia_{data_hoje}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-
-
+            st.download_button(label="📥 Baixar Tabela IA (.csv)", data=df_ia.to_csv(index=False).encode("utf-8-sig"), file_name=f"sugestoes_ia_{datetime.date.today().strftime('%d_%m_%Y')}.csv", mime="text/csv", use_container_width=True)
 
     # ─────────────────────────────────────────────────────────
     # TAB 6: GUIA DO USUÁRIO
     # ─────────────────────────────────────────────────────────
     with tab6:
-        css = """
+        st.markdown("""
 <style>
-.guia-card{background:#f0f9f8;border-left:4px solid #0D9488;border-radius:8px;
-           padding:14px 18px;margin-bottom:12px;}
+.guia-card{background:#f0f9f8;border-left:4px solid #0D9488;border-radius:8px;padding:14px 18px;margin-bottom:12px;}
 .guia-card h4{color:#0F2B4F;margin:0 0 6px 0;}
 .guia-card p,.guia-card li{color:#334155;font-size:14px;margin:2px 0;}
-.guia-badge{display:inline-block;padding:2px 10px;border-radius:12px;
-             font-size:12px;font-weight:600;color:white;}
-.bg-green{background:#22C55E;}.bg-teal{background:#0D9488;}
-.bg-yellow{background:#EAB308;color:#1e1e1e;}.bg-red{background:#EF4444;}
-</style>"""
-        st.markdown(css, unsafe_allow_html=True)
+.guia-badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:12px;font-weight:600;color:white;}
+.bg-green{background:#22C55E;}.bg-teal{background:#0D9488;}.bg-yellow{background:#EAB308;color:#1e1e1e;}.bg-red{background:#EF4444;}
+</style>""", unsafe_allow_html=True)
 
         st.markdown("## 📖 Guia do Usuário — SONAR")
         st.markdown("*Manual de referência para analistas de demanda e planejamento*")
         st.divider()
 
-        # ── OBJETIVO ────────────────────────────────────────
-        st.markdown("### 🎯 Objetivo da Ferramenta")
-        st.markdown(
-            "O **SONAR** (*Supply & Operations Near-real-time Analytics & Recommendation*) combina **9 métodos estatísticos** com **Inteligência Artificial "
-            "(Gradient Boosting)** treinada individualmente por SKU. "
-            "O objetivo central é **reduzir o WMAPE** em relação ao modelo atual e fornecer ao analista "
-            "de demanda uma base analítica robusta para tomada de decisão. "
-            "A ferramenta **não substitui o julgamento do analista** — ela o apoia com evidências "
-            "quantitativas, classificação automática de perfis e diagnóstico de SKUs problemáticos."
-        )
+        st.markdown("### 🗂️ Estrutura do Arquivo Excel Esperado")
+        st.markdown("""
+O SONAR lê as seguintes abas do arquivo Excel:
+
+| Aba | Obrigatória | Descrição |
+|-----|-------------|-----------|
+| **Base_Limpa** | ✅ Sim | Histórico de demanda: SKU | Ano | Mês | Demanda | Consumo |
+| **Base_Dados** | ✅ Sim | Cadastro de SKUs com as 3 novas colunas de controle |
+| Estatistica_SKU | Opcional | Estatísticas por SKU do arquivo original |
+| Avaliacao_Modelo | Opcional | Avaliações originais para comparação de ganho |
+
+**Colunas da aba Base_Dados:**
+
+| Coluna | Função |
+|--------|--------|
+| `Classe de Material` | Código da classe — usado como filtro para a IA Out-of-Sample |
+| `Descrição da Classe` | Texto descritivo — exibido junto com o código no filtro |
+| `Situação` | Saneamento de SKU — apenas SKUs com valor **"Normal"** são processados pelo SONAR |
+
+> ⚠️ SKUs com `Situação ≠ Normal` (ex: "Inativo", "Cancelado", "Suspenso") são **descartados automaticamente** antes de qualquer cálculo. O número de SKUs descartados aparece na barra lateral.
+""")
         st.divider()
 
-        # ── CONCEITOS ────────────────────────────────────────
-        st.markdown("### 📐 Conceitos Fundamentais")
-        col_c1, col_c2 = st.columns(2)
+        st.markdown("### 🔬 Filtro por Classe no IA Out-of-Sample")
+        st.markdown("""
+O filtro de classe permite segmentar quais SKUs serão avaliados pelo processo Out-of-Sample da IA:
 
-        with col_c1:
-            st.markdown(
-                '<div class="guia-card"><h4>📊 WMAPE — Indicador Principal</h4>'
-                '<p>Mede o erro de previsão ponderado pela demanda real:</p>'
-                '<p style="font-family:monospace;background:#e2e8f0;padding:4px 8px;border-radius:4px">'
-                'WMAPE = Σ|Real − Prev| ÷ Σ|Real|</p>'
-                '<p>Meta do pipeline V5: <b>&lt; 35%</b></p><br>'
-                '<span class="guia-badge bg-green">&lt;20% Excelente</span>&nbsp;'
-                '<span class="guia-badge bg-teal">20–35% Bom</span>&nbsp;'
-                '<span class="guia-badge bg-yellow">35–60% Regular</span>&nbsp;'
-                '<span class="guia-badge bg-red">&gt;60% Crítico</span></div>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                '<div class="guia-card"><h4>🔄 Walk-Forward Validation</h4>'
-                '<p>Simula como cada método <b>teria se saído no passado real</b>, treinando apenas com '
-                'dados anteriores. Evita o data leakage e garante que o WMAPE calculado é o que o método '
-                'produziria na prática.</p>'
-                '<p><b>Exemplo (3 períodos):</b> Treina Jan–Set → prevê Out | '
-                'Treina Jan–Out → prevê Nov | Treina Jan–Nov → prevê Dez.</p></div>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                '<div class="guia-card"><h4>📈 FVA — Forecast Value Added</h4>'
-                '<p>Mede se a <b>intervenção manual do analista</b> melhora ou piora a previsão estatística. '
-                'FVA positivo = analista agrega valor. FVA negativo = ferramenta acerta mais.</p>'
-                '<p>Use para identificar SKUs onde o ajuste manual é bem-vindo e onde é melhor confiar no modelo.</p></div>',
-                unsafe_allow_html=True
-            )
+1. **Pesquise** a classe no campo de texto (filtra por código ou descrição)
+2. **Selecione** uma ou mais classes no multiselect
+3. O **badge de segmentação** exibe quantas classes e SKUs serão avaliados
+4. Clique em **🔬 IA Out-of-Sample**
 
-        with col_c2:
-            st.markdown(
-                '<div class="guia-card"><h4>🏷️ Classificação da Demanda (CV)</h4>'
-                '<ul>'
-                '<li><b>🟢 Estável</b> — CV &lt; 0,25. Previsível. Use MA-6 ou SES.</li>'
-                '<li><b>🟡 Variável</b> — CV 0,25–0,60. Use SES ou Holt.</li>'
-                '<li><b>🔴 Errática</b> — CV &gt; 0,60. Alta volatilidade. Revisar dados.</li>'
-                '<li><b>⚪ Intermitente</b> — Mais de 50% de zeros. Use Croston.</li>'
-                '<li><b>🔵 Esporádica</b> — Zeros frequentes + alta variação.</li>'
-                '</ul></div>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                '<div class="guia-card"><h4>⭐ TriM-Heres — Método Sazonal</h4>'
-                '<p>Captura <b>sazonalidade trimestral</b> sem exigir séries longas. '
-                'Para prever Jul/26, usa Mai+Jun+Jul de 2024 e 2025 (média das 6 obs). '
-                'Se não tiver as 6, pondera com a média anual proporcionalmente. '
-                'Recomendado quando <b>ACF lag-12 &gt; 0,4</b>.</p></div>',
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                '<div class="guia-card"><h4>🤖 IA — Gradient Boosting por SKU</h4>'
-                '<p>Treinada individualmente com features de lag (últimos 6 valores, médias móveis, desvio padrão). '
-                'Aprende padrões não-lineares invisíveis aos modelos clássicos.</p>'
-                '<p><b>Previsão combinada:</b> ajuste o slider de peso IA vs estatístico conforme o perfil do SKU. '
-                'Para séries curtas (&lt;14 períodos), a IA não é treinada.</p></div>',
-                unsafe_allow_html=True
-            )
-
+Sem seleção → todos os SKUs elegíveis são avaliados.
+A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
+""")
         st.divider()
 
-        # ── GUIA POR ABA ─────────────────────────────────────
-        st.markdown("### 🗂️ O Que Fazer em Cada Aba")
-
-        abas_guia = [
-            ("📊 Simulação Retrospectiva", "Diagnóstico e benchmarking de 9 métodos", [
-                "Analise a tabela resumo: veja quantos SKUs cada método consegue abaixo de 35% de WMAPE (meta do SONAR).",
-                "Compare o ganho vs original: a coluna '▲/▼ Ganho vs Original' mostra se o SONAR melhora em relação ao arquivo atual.",
+        for nome_aba, objetivo, passos in [
+            ("📊 Simulação Retrospectiva","Diagnóstico e benchmarking de 9 métodos",[
+                "Analise a tabela resumo: veja quantos SKUs cada método consegue abaixo de 35% de WMAPE.",
                 "Use o box plot para entender a dispersão — métodos com mediana baixa mas máximo alto têm SKUs problemáticos específicos.",
-                "Na tabela mensal (parte inferior): selecione o mês fechado mais recente e compare Realizado × Prev. Original × Melhor Prev. SONAR por SKU. Exporte em Excel com um clique.",
-                "Ação esperada: identificar o método com melhor desempenho global e validar o ganho para justificar a adoção no ciclo de S&OP.",
+                "Na tabela mensal: selecione o mês fechado mais recente e compare Realizado × Prev. Original × Melhor Prev. SONAR por SKU.",
             ]),
-            ("🎯 Seletor de Método", "Qual método usar por SKU", [
-                "Filtre por classificação (ex: Intermitente) para ver todos os SKUs daquele perfil e o melhor método identificado.",
-                "Use o heatmap 'Classificação × Melhor Método' para confirmar se as regras de recomendação estão sendo seguidas.",
-                "Exporte a tabela em Excel e use como insumo na revisão do Plano de Demandas.",
-                "SKUs com WMAPE alto mesmo no melhor método são candidatos a revisão manual do histórico.",
+            ("🔬 IA Out-of-Sample (sidebar)","Calibração do peso da IA por segmento",[
+                "Selecione a(s) classe(s) de material desejadas no filtro da barra lateral.",
+                "Observe o badge de segmentação — ele confirma quantos SKUs serão avaliados.",
+                "Clique no botão e aguarde. Após concluir, rode o Pipeline Completo novamente para aplicar os pesos calibrados.",
+                "O badge na tab IA + Previsão registra qual segmentação foi usada no último OOS.",
             ]),
-            ("🔍 Análise por SKU", "Investigação individual de comportamento", [
-                "Selecione um SKU e analise o histórico: há tendência? Sazonalidade? Quebra estrutural recente?",
-                "O gráfico de ACF mostra correlação com períodos passados. Barras além das linhas pontilhadas = memória na série.",
-                "Compare as 9 previsões lado a lado no gráfico — grande divergência entre elas indica demanda imprevisível.",
-                "Para SKUs com ACF positivo no lag 12, aplique TriM-Heres. Para séries com quebra recente, revise o histórico base.",
+            ("🤖 IA + Previsão","Previsão M+1/M+2/M+3 e análise OOS",[
+                "A tabela de Horizonte 3 Meses usa os pesos automáticos calibrados pelo OOS.",
+                "No painel OOS, um badge de segmentação exibe o filtro de classe usado na última execução.",
+                "Rode o Pipeline Completo após o OOS para que a Prev. Combinada reflita os pesos calibrados.",
             ]),
-            ("🤖 IA + Previsão", "Previsão M+1/M+2/M+3 e calibração automática do peso da IA", [
-                "No gráfico IA vs Modelo Estatístico, verifique se a IA captura o padrão histórico (eixo X mostra meses reais).",
-                "A tabela 'Horizonte 3 Meses' exibe M+1/M+2/M+3 em relação ao mês vigente — atualiza automaticamente no virar do mês.",
-                "Use o painel 'IA Out-of-Sample' (botão 🔬 na sidebar) para calibrar o peso ideal por SKU — roda em 2 a 8 min para os 75 SKUs selecionados.",
-                "Após rodar o OOS, o SONAR define automaticamente o peso de cada SKU: 70% se IA vence, 50% se similar, 0% se estatístico vence (IA zerada). Não é necessário ajustar o slider manualmente.",
-                "O slider global continua existindo como fallback para SKUs sem OOS e como override manual quando necessário.",
-                "Rode o pipeline novamente após o OOS para que a Prev. Combinada reflita os pesos calibrados. A sidebar exibe o badge '🎯 Peso automático ativo: N SKUs calibrados'.",
-                "Exporte o horizonte em Excel e use como insumo direto no ciclo N1 do Plano de Demandas.",
+            ("📋 Top 10 Piores WMAPE","Priorização nos SKUs críticos",[
+                "Dois painéis: 12 meses (problemas estruturais) e 6 meses (problemas recentes).",
+                "SKU aparece nos dois → problema estrutural. Só no de 6 meses → evento pontual recente.",
+                "Apenas SKUs com situação Normal aparecem aqui (os demais foram descartados na carga).",
             ]),
-            ("📋 Top 10 Piores WMAPE", "Priorização e ação nos SKUs críticos", [
-                "Dois painéis lado a lado: 12 meses (problemas estruturais) e 6 meses (problemas recentes). Compare os dois rankings simultaneamente.",
-                "Se um SKU aparece nos dois painéis = problema estrutural. Só no de 6 meses = evento pontual recente.",
-                "SKUs com menos de 3 registros na janela são automaticamente excluídos do ranking — evita distorção por série vazia.",
-                "Para cada SKU, leia o diagnóstico da IA e avalie a sugestão: revisar histórico, trocar método ou ajustar plano.",
-                "Mini-gráfico com eixo em meses reais: identifique outlier, quebra ou sazonalidade não capturada.",
-                "Exporte o relatório em Excel para documentar as ações no ciclo de S&OP.",
-            ]),
-        ]
-
-        for nome_aba, objetivo, passos in abas_guia:
+        ]:
             with st.expander(f"{nome_aba} — {objetivo}", expanded=False):
                 st.markdown(f"**Objetivo:** {objetivo}")
-                st.markdown("**Passo a passo do analista:**")
                 for p in passos:
                     st.markdown(f"- {p}")
 
         st.divider()
-
-        # ── FAQs ─────────────────────────────────────────────
-        st.markdown("### ❓ Perguntas Frequentes")
-
-        faqs = [
-            ("Por que o WMAPE médio é alto mas a maioria dos SKUs está bem?",
-             "SKUs com demanda muito baixa podem ter WMAPE de 500%+, distorcendo a média. "
-             "Sempre analise a **mediana** do WMAPE, que é mais robusta a outliers. "
-             "WMAPE mediana de 35% significa que metade dos SKUs erra menos que 35%."),
-            ("Quando confiar mais na IA do que no modelo estatístico?",
-             "Com o **peso automático por SKU**, você não precisa mais decidir manualmente. "
-             "Após rodar o **🔬 IA Out-of-Sample**, o SONAR define automaticamente: "
-             "**70%** de peso para IA quando ela vence o estatístico, "
-             "**50%** quando o desempenho é similar, e "
-             "**0%** quando o estatístico é mais confiável (IA zerada — 100% método estatístico). "
-             "O slider global continua como fallback para SKUs sem OOS."),
-            ("Qual a diferença entre WMAPE in-sample e WMAPE out-of-sample da IA?",
-             "O **WMAPE in-sample** é medido nos mesmos dados usados no treino — o modelo já os conhece, então o resultado é otimista. "
-             "O **WMAPE out-of-sample** re-treina a IA excluindo os períodos de teste — resultado honesto e comparável ao backtesting estatístico. "
-             "Para calibrar o slider de peso, sempre use o out-of-sample."),
-            ("O que fazer quando nenhum método tem WMAPE abaixo de 60%?",
-             "Ações recomendadas: (1) revisar o histórico e remover outliers, "
-             "(2) verificar se há quebra estrutural (novo projeto, novo cliente, troca de empreiteira), "
-             "(3) adotar estoque de segurança maior em vez de depender da previsão, "
-             "(4) classificar como demanda errática e planejar por disponibilidade mínima."),
-            ("Como usar o horizonte de 3 meses no ciclo de planejamento?",
-             "Exporte a tabela no início de cada ciclo N1. Os valores de M+1 são os mais confiáveis. "
-             "M+2 e M+3 têm incerteza crescente — use como referência mas aplique julgamento sobre eventos conhecidos. "
-             "O horizonte avança automaticamente no virar do mês — sem necessidade de reconfigurar."),
-            ("Por que os dois painéis do Top 10 (6 e 12 meses) mostram rankings diferentes?",
-             "A janela de 6 meses avalia o WMAPE apenas nos últimos 6 meses disponíveis na base, capturando problemas recentes. "
-             "A de 12 meses captura o comportamento anual completo. "
-             "Se um SKU está no Top 10 de 6 meses mas não no de 12, o problema é pontual (evento recente). "
-             "Se aparece nos dois, é estrutural e exige ação mais profunda."),
-            ("O que significa 'SKU excluído' no Top 10?",
-             "SKUs com menos de 3 registros na janela selecionada são automaticamente excluídos do ranking. "
-             "Isso evita que itens com histórico quase vazio (ex: produto novo com 1 ou 2 meses de dado) "
-             "dominem o Top 10 com WMAPEs distorcidos. Eles continuam visíveis na Análise por SKU individual."),
-        ]
-
-        for pergunta, resposta in faqs:
-            with st.expander(f"❓ {pergunta}"):
-                st.markdown(resposta)
-
-        st.divider()
-
-        # ── LIMITAÇÕES E BOAS PRÁTICAS ───────────────────────
-        st.markdown("### ⚠️ Limitações e Boas Práticas")
         col_lim1, col_lim2 = st.columns(2)
         with col_lim1:
-            st.warning(
-                "**Limitações do pipeline:**\n\n"
+            st.warning("**Limitações do pipeline:**\n\n"
+                "- SKUs com situação ≠ Normal são descartados automaticamente\n"
                 "- SKUs com menos de 14 períodos não têm modelo de IA\n"
-                "- Holt-Winters exige mínimo de 24 períodos para otimização confiável\n"
+                "- Holt-Winters exige mínimo de 24 períodos\n"
                 "- TriM-Heres requer 2 anos de histórico para resultado ideal\n"
-                "- WMAPE in-sample da IA é otimista — use o OOS para calibração real\n"
-                "- O peso automático é definido em 3 faixas fixas (0/50/70%) — não é contínuo\n"
-                "- O WMAPE pode ser distorcido por outliers — revise o histórico se suspeitar de dados incorretos\n"
-                "- Eventos disruptivos exigem ajuste manual — o SONAR assume continuidade do padrão histórico"
-            )
+                "- WMAPE in-sample da IA é otimista — use o OOS para calibração\n"
+                "- O peso automático é definido em 3 faixas fixas (0/50/70%)")
         with col_lim2:
-            st.success(
-                "**Boas práticas recomendadas:**\n\n"
-                "- Mantenha a base histórica limpa e atualizada mensalmente\n"
-                "- Sempre rode o pipeline com pelo menos 12 meses de histórico\n"
-                "- Rode o OOS mensalmente nos SKUs críticos → pipeline novamente para aplicar os pesos\n"
-                "- Verifique o badge na sidebar: '🎯 Peso automático ativo: N SKUs calibrados'\n"
-                "- Use o FVA para medir se a intervenção manual agrega valor\n"
+            st.success("**Boas práticas recomendadas:**\n\n"
+                "- Mantenha Situação atualizada na Base_Dados mensalmente\n"
+                "- Use o filtro de classe para segmentar o OOS por categoria estratégica\n"
+                "- Rode o OOS → Pipeline novamente para aplicar os pesos calibrados\n"
+                "- Verifique o badge na sidebar: '🎯 Peso automático ativo: N SKUs'\n"
                 "- Compare os painéis de 6 e 12 meses no Top 10 para classificar problemas\n"
-                "- Documente ajustes manuais feitos sobre a previsão do SONAR\n"
-                "- Combine a previsão do SONAR com o conhecimento de mercado da equipe comercial"
-            )
+                "- Combine a previsão do SONAR com o conhecimento de mercado da equipe")
 
-# ══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     main()
