@@ -1065,7 +1065,10 @@ def main():
                 'Ganho vs Original': ganho_str,
             })
 
-        df_res = pd.DataFrame(resumo).sort_values('SKUs WMAPE < 35%', ascending=False)
+        df_res = pd.DataFrame(resumo)
+        _col_sort = 'SKUs WMAPE < 35%'
+        if not df_res.empty and _col_sort in df_res.columns:
+            df_res = df_res.sort_values(_col_sort, ascending=False).reset_index(drop=True)
         st.dataframe(df_res, use_container_width=True, hide_index=True)
 
         col_a, col_b = st.columns(2)
