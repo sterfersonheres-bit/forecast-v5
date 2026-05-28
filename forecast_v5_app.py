@@ -275,9 +275,14 @@ CLASSE_ICONES = {
 def detectar_tendencia(serie: pd.Series):
     s = serie.dropna()
     if len(s) < 4: return 0.0, "➡️ Sem dados"
+    # Série constante (variância zero) → estável, sem regressão degenerada
+    if s.nunique() <= 1 or np.isclose(s.std(), 0.0):
+        return 0.0, "➡️ Estável"
     x = np.arange(len(s))
     slope, _, _, p_value, _ = stats.linregress(x, s.values)
-    if p_value > 0.1: return slope, "➡️ Estável"
+    # p_value NaN (degenerado) ou não significativo, ou slope ~0 → estável
+    if pd.isna(p_value) or p_value > 0.1 or np.isclose(slope, 0.0):
+        return slope, "➡️ Estável"
     return (slope, "📈 Crescente") if slope > 0 else (slope, "📉 Decrescente")
 
 def detectar_sazonalidade(serie: pd.Series) -> str:
@@ -307,10 +312,47 @@ N_LAGS = 6
 FEAT_NAMES = ([f'lag_{i}' for i in range(1, N_LAGS+1)] +
               ['roll_mean_3', 'roll_std_3', 'roll_mean_6', 'roll_min_3', 'roll_max_3'])
 
+def _ajustar_tendencia(s_vals):
+    """Ajusta tendência linear robusta. Retorna (slope, intercept).
+    Para séries < 4 pontos ou constantes, slope=0 (sem detrend)."""
+    n = len(s_vals)
+    if n < 4:
+        return 0.0, float(np.mean(s_vals)) if n > 0 else 0.0
+    x = np.arange(n)
+    try:
+        slope, intercept = np.polyfit(x, s_vals, 1)
+        if not (np.isfinite(slope) and np.isfinite(intercept)):
+            return 0.0, float(np.mean(s_vals))
+        return float(slope), float(intercept)
+    except Exception:
+        return 0.0, float(np.mean(s_vals))
+
+def _features_de(vals_arr):
+    """Monta o vetor de features a partir de um array (resíduos), usando os
+    últimos pontos. Mesma definição de criar_features, mas pontual."""
+    buf = np.array(vals_arr[-(N_LAGS + 3):] if len(vals_arr) >= N_LAGS + 3 else vals_arr, dtype=float)
+    lags = [buf[-(i)] for i in range(1, N_LAGS + 1)]
+    r3 = np.mean(buf[-3:]) if len(buf) >= 3 else np.mean(buf)
+    s3 = np.std(buf[-3:]) if len(buf) >= 3 else 0.0
+    r6 = np.mean(buf[-min(6, len(buf)):])
+    mn3 = np.min(buf[-3:]) if len(buf) >= 3 else np.min(buf)
+    mx3 = np.max(buf[-3:]) if len(buf) >= 3 else np.max(buf)
+    return np.array([*lags, r3, s3, r6, mn3, mx3], dtype=float).reshape(1, -1)
+
 def treinar_ia(serie: pd.Series):
+    """Treina GBM sobre os RESÍDUOS de uma tendência linear (detrending).
+    Isso permite que a IA extrapole tendências — algo que árvores puras não fazem,
+    pois saturam no valor máximo visto. Retorna um dicionário-wrapper."""
     s = serie.dropna().reset_index(drop=True)
     if len(s) < 14: return None
-    df_f = criar_features(s, N_LAGS)
+
+    # Detrend: ajusta tendência linear e treina sobre os resíduos
+    slope, intercept = _ajustar_tendencia(s.values.astype(float))
+    x = np.arange(len(s))
+    resid = s.values.astype(float) - (slope * x + intercept)
+    resid_s = pd.Series(resid)
+
+    df_f = criar_features(resid_s, N_LAGS)
     if len(df_f) < 6: return None
     X = df_f[FEAT_NAMES].values
     y = df_f['y'].values
@@ -318,58 +360,94 @@ def treinar_ia(serie: pd.Series):
                                       subsample=0.8, random_state=42, min_samples_leaf=2)
     try:
         model.fit(X, y)
-        return model
-    except:
+        return {'gbm': model, 'slope': slope, 'intercept': intercept, 'n_train': len(s)}
+    except Exception:
         return None
+
+def _get_gbm(model):
+    """Compatibilidade: extrai o GBM do wrapper (ou retorna o próprio se for modelo cru)."""
+    if isinstance(model, dict):
+        return model.get('gbm')
+    return model
 
 def prever_ia(model, serie: pd.Series):
     if model is None: return None
+    gbm = _get_gbm(model)
+    if gbm is None: return None
     s = serie.dropna().reset_index(drop=True)
     if len(s) < N_LAGS: return None
     try:
-        last = s.tail(N_LAGS + 3).values.astype(float)
-        lags = [last[-(i)] for i in range(1, N_LAGS+1)]
-        roll3 = np.mean(last[-3:])
-        std3  = np.std(last[-3:]) if len(last) >= 3 else 0.0
-        roll6 = np.mean(last[-min(6, len(last)):])
-        min3  = np.min(last[-3:])
-        max3  = np.max(last[-3:])
-        feats = np.array([*lags, roll3, std3, roll6, min3, max3], dtype=float).reshape(1, -1)
-        return float(max(0.0, model.predict(feats)[0]))
-    except:
+        slope     = model.get('slope', 0.0) if isinstance(model, dict) else 0.0
+        intercept = model.get('intercept', 0.0) if isinstance(model, dict) else 0.0
+        n_train   = model.get('n_train', len(s)) if isinstance(model, dict) else len(s)
+
+        # Resíduos sobre a tendência ajustada no treino
+        x = np.arange(len(s))
+        resid = s.values.astype(float) - (slope * x + intercept)
+        feats = _features_de(resid)
+        resid_pred = float(gbm.predict(feats)[0])
+
+        # Re-adiciona a tendência no índice futuro
+        idx_futuro = n_train  # próximo ponto após o treino
+        trend_futuro = slope * idx_futuro + intercept
+        return float(max(0.0, resid_pred + trend_futuro))
+    except Exception:
         return None
 
 def prever_ia_multistep(model, serie: pd.Series, h: int = 3):
     if model is None: return [None] * h
-    s = list(serie.dropna().values.astype(float))
+    gbm = _get_gbm(model)
+    if gbm is None: return [None] * h
+    s = serie.dropna().reset_index(drop=True)
     if len(s) < N_LAGS: return [None] * h
+    try:
+        slope     = model.get('slope', 0.0) if isinstance(model, dict) else 0.0
+        intercept = model.get('intercept', 0.0) if isinstance(model, dict) else 0.0
+        n_train   = model.get('n_train', len(s)) if isinstance(model, dict) else len(s)
+    except Exception:
+        slope, intercept, n_train = 0.0, 0.0, len(s)
+
+    # Buffer de resíduos (não de valores) — o GBM opera no domínio dos resíduos
+    x = np.arange(len(s))
+    resid_buf = list(s.values.astype(float) - (slope * x + intercept))
     preds = []
-    for _ in range(h):
+    for step in range(h):
         try:
-            buf = s[-(N_LAGS + 3):] if len(s) >= N_LAGS + 3 else s[:]
-            buf = np.array(buf, dtype=float)
-            lags  = [buf[-(i)] for i in range(1, N_LAGS + 1)]
-            r3    = np.mean(buf[-3:]) if len(buf) >= 3 else np.mean(buf)
-            s3    = np.std(buf[-3:])  if len(buf) >= 3 else 0.0
-            r6    = np.mean(buf[-min(6, len(buf)):])
-            mn3   = np.min(buf[-3:])  if len(buf) >= 3 else np.min(buf)
-            mx3   = np.max(buf[-3:])  if len(buf) >= 3 else np.max(buf)
-            feats = np.array([*lags, r3, s3, r6, mn3, mx3], dtype=float).reshape(1, -1)
-            pred  = float(max(0.0, model.predict(feats)[0]))
-            preds.append(pred)
-            s.append(pred)
+            feats = _features_de(resid_buf)
+            resid_pred = float(gbm.predict(feats)[0])
+            idx_futuro = n_train + step
+            trend_futuro = slope * idx_futuro + intercept
+            valor = float(max(0.0, resid_pred + trend_futuro))
+            preds.append(valor)
+            resid_buf.append(resid_pred)   # alimenta o próximo passo com o RESÍDUO
         except Exception:
             preds.append(None)
     return preds
 
 def wmape_ia_insample(model, serie: pd.Series):
+    """WMAPE in-sample no domínio dos VALORES (reconstruídos = resíduo previsto + tendência)."""
+    gbm = _get_gbm(model)
+    if gbm is None: return np.nan, np.array([]), np.array([])
     s = serie.dropna().reset_index(drop=True)
-    df_f = criar_features(s, N_LAGS)
+    slope     = model.get('slope', 0.0) if isinstance(model, dict) else 0.0
+    intercept = model.get('intercept', 0.0) if isinstance(model, dict) else 0.0
+
+    x = np.arange(len(s))
+    trend = slope * x + intercept
+    resid_s = pd.Series(s.values.astype(float) - trend)
+
+    df_f = criar_features(resid_s, N_LAGS)
     if len(df_f) < 4: return np.nan, np.array([]), np.array([])
     X = df_f[FEAT_NAMES].values
-    y = df_f['y'].values
-    preds = np.maximum(0, model.predict(X))
-    return wmape(y, preds), y, preds
+    resid_pred = gbm.predict(X)
+
+    # Reconstruir valores: resíduo previsto + tendência no índice correspondente
+    offset = len(resid_s) - len(df_f)
+    idxs = np.arange(offset, len(resid_s))
+    trend_vals = slope * idxs + intercept
+    y_pred = np.maximum(0, resid_pred + trend_vals)
+    y_real = s.values.astype(float)[offset:]
+    return wmape(y_real, y_pred), y_real, y_pred
 
 # ══════════════════════════════════════════════════════════════
 # EXPORTAÇÃO EXCEL
@@ -713,10 +791,13 @@ def main():
         else:
             st.caption("Slider global aplicado a todos os SKUs")
 
-        # ── Informativo de saneamento (situação ≠ Normal) ────
+        # ── Informativo de saneamento (situação ≠ "1- NORMAL") ────
         _n_desc = st.session_state.get('n_descartados_situacao', 0)
-        if _n_desc > 0:
-            st.warning(f"⚠️ **{_n_desc} SKUs descartados** — situação ≠ Normal")
+        _alerta_sit = st.session_state.get('alerta_situacao')
+        if _alerta_sit:
+            st.warning(_alerta_sit)
+        elif _n_desc > 0:
+            st.warning(f"⚠️ **{_n_desc} SKUs descartados** — situação ≠ \"1- NORMAL\"")
 
         n_test = st.slider("Períodos de backtesting (walk-forward)", 2, 6, 3)
         peso_ia = st.slider("Peso da IA na previsão combinada (%)", 0, 100, 50,
@@ -726,7 +807,8 @@ def main():
         if st.button("🗑️ Limpar Cache", use_container_width=True):
             st.cache_data.clear()
             for k in ['df_backtest', 'df_ia', 'df_oos', 'peso_por_sku', '_det_oos',
-                      'n_descartados_situacao', 'df_sku_meta', 'classes_disponiveis']:
+                      'n_descartados_situacao', 'df_sku_meta', 'classes_disponiveis',
+                      'alerta_situacao', 'classes_selecionadas_oos', '_oos_segmentacao']:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -830,20 +912,42 @@ def main():
             if _col_desc: rename_map[_col_desc] = 'descricao_classe'
             df_sku_meta = df_sku_meta.rename(columns=rename_map)
 
-            # ── 1. SANEAMENTO: descartar SKUs com situação ≠ Normal ──
+            # ── 1. SANEAMENTO: manter apenas SKUs com situação = "1- NORMAL" ──
+            # Comparação robusta: ignora caixa, acentos e espaços ("1- NORMAL",
+            # "1 - NORMAL", "1-NORMAL" e variações de capitalização são aceitas).
             if 'situacao' in df_sku_meta.columns:
-                _skus_normais = set(
-                    df_sku_meta[
-                        df_sku_meta['situacao'].astype(str).str.strip().str.lower() == 'normal'
-                    ]['sku'].unique()
+                _sit_norm = (
+                    df_sku_meta['situacao'].astype(str)
+                    .str.strip().str.lower()
+                    .str.replace(' ', '', regex=False)
                 )
-                _n_antes  = df_base[col_sku].nunique()
-                df_base   = df_base[df_base[col_sku].isin(_skus_normais)].copy()
-                _n_depois = df_base[col_sku].nunique()
-                _n_desc   = _n_antes - _n_depois
-                st.session_state['n_descartados_situacao'] = _n_desc
+                _skus_normais = set(
+                    df_sku_meta[_sit_norm == '1-normal']['sku'].unique()
+                )
+                _n_antes = df_base[col_sku].nunique()
+
+                # TRAVA DE SEGURANÇA: se o filtro descartaria TODA (ou quase toda)
+                # a base, o formato da coluna provavelmente diverge de "1- NORMAL".
+                # Nesse caso, NÃO filtra e avisa — evita esvaziar a base por engano.
+                _skus_base = set(df_base[col_sku].unique())
+                _n_manteria = len(_skus_normais & _skus_base)
+
+                if _n_manteria == 0 and _n_antes > 0:
+                    st.session_state['n_descartados_situacao'] = 0
+                    st.session_state['alerta_situacao'] = (
+                        "⚠️ Nenhum SKU tem situação \"1- NORMAL\". O saneamento foi "
+                        "IGNORADO para não esvaziar a base. Verifique os valores da "
+                        f"coluna Situação. Valores encontrados: "
+                        f"{sorted(df_sku_meta['situacao'].dropna().astype(str).unique())[:8]}"
+                    )
+                else:
+                    df_base   = df_base[df_base[col_sku].isin(_skus_normais)].copy()
+                    _n_depois = df_base[col_sku].nunique()
+                    st.session_state['n_descartados_situacao'] = _n_antes - _n_depois
+                    st.session_state['alerta_situacao'] = None
             else:
                 st.session_state['n_descartados_situacao'] = 0
+                st.session_state['alerta_situacao'] = None
 
             # ── 2. CLASSES: construir lista para o filtro OOS ─────────
             if 'classe' in df_sku_meta.columns and 'descricao_classe' in df_sku_meta.columns:
@@ -1399,7 +1503,8 @@ Ajuste o peso no slider da barra lateral. Após rodar o **🔬 IA Out-of-Sample*
 
         with col_vis2:
             if model_vis is not None:
-                imp_df = pd.DataFrame({'Feature': FEAT_NAMES, 'Importância': model_vis.feature_importances_}).sort_values('Importância', ascending=True)
+                _gbm_vis = _get_gbm(model_vis)
+                imp_df = pd.DataFrame({'Feature': FEAT_NAMES, 'Importância': _gbm_vis.feature_importances_}).sort_values('Importância', ascending=True)
                 fig_imp = px.bar(imp_df, x='Importância', y='Feature', orientation='h', title='Importância das Features (IA)', template='plotly_white', color='Importância', color_continuous_scale='Blues')
                 fig_imp.update_layout(showlegend=False, coloraxis_showscale=False, height=380)
                 st.plotly_chart(fig_imp, use_container_width=True)
@@ -1703,9 +1808,9 @@ O SONAR lê as seguintes abas do arquivo Excel:
 |--------|--------|
 | `Classe de Material` | Código da classe — usado como filtro para a IA Out-of-Sample |
 | `Descrição da Classe` | Texto descritivo — exibido junto com o código no filtro |
-| `Situação` | Saneamento de SKU — apenas SKUs com valor **"Normal"** são processados pelo SONAR |
+| `Situação` | Saneamento de SKU — apenas SKUs com valor **"1- NORMAL"** são processados pelo SONAR |
 
-> ⚠️ SKUs com `Situação ≠ Normal` (ex: "Inativo", "Cancelado", "Suspenso") são **descartados automaticamente** antes de qualquer cálculo. O número de SKUs descartados aparece na barra lateral.
+> ⚠️ SKUs com `Situação ≠ "1- NORMAL"` (ex: "2- INATIVO", "3- CANCELADO", "4- SUSPENSO") são **descartados automaticamente** antes de qualquer cálculo. O número de SKUs descartados aparece na barra lateral.
 """)
         st.divider()
 
@@ -1755,7 +1860,7 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
         col_lim1, col_lim2 = st.columns(2)
         with col_lim1:
             st.warning("**Limitações do pipeline:**\n\n"
-                "- SKUs com situação ≠ Normal são descartados automaticamente\n"
+                "- SKUs com situação ≠ \"1- NORMAL\" são descartados automaticamente\n"
                 "- SKUs com menos de 14 períodos não têm modelo de IA\n"
                 "- Holt-Winters exige mínimo de 24 períodos\n"
                 "- TriM-Heres requer 2 anos de histórico para resultado ideal\n"
