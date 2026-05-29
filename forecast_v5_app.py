@@ -1120,6 +1120,37 @@ def main():
                 st.session_state['_det_oos']     = _det_map
                 st.session_state['peso_por_sku'] = _peso_por_sku
                 st.session_state['_oos_segmentacao'] = _label_seg
+
+                # ── RECALCULAR df_ia COM OS NOVOS PESOS ───────────────
+                # Atualiza só as colunas dependentes do peso (previsao_combinada
+                # e peso_ia_usado). As previsões individuais (IA e estatística)
+                # já foram geradas pelo pipeline e não mudam.
+                st.write("🔄 Aplicando pesos calibrados às previsões combinadas...")
+                _df_ia_upd = df_ia_loaded.copy()
+                _n_recalc = 0
+                for _idx, _row in _df_ia_upd.iterrows():
+                    _sku_r   = _row['sku']
+                    _pred_st = _row.get('previsao_estatistica', 0)
+                    _pred_ia = _row.get('previsao_ia', np.nan)
+
+                    # Peso: automático (OOS) se existir, senão slider global
+                    _peso_r = _peso_por_sku.get(_sku_r, _peso_por_sku.get(float(_sku_r), None))
+                    _peso_efetivo = _peso_r if _peso_r is not None else peso_ia
+
+                    if pd.notna(_pred_ia):
+                        _pred_comb = _peso_efetivo * _pred_ia + (1 - _peso_efetivo) * _pred_st
+                    else:
+                        _pred_comb = _pred_st
+                        _peso_efetivo = 0.0
+
+                    _df_ia_upd.at[_idx, 'previsao_combinada'] = round(_pred_comb, 2)
+                    _df_ia_upd.at[_idx, 'peso_ia_usado']      = round(_peso_efetivo * 100, 0)
+                    if _peso_r is not None:
+                        _n_recalc += 1
+
+                st.session_state['df_ia'] = _df_ia_upd
+                st.write(f"✅ {_n_recalc} SKUs com peso automático aplicado ao df_ia.")
+
                 _oos_status.update(label="✅ Out-of-Sample concluído!", state="complete")
             st.rerun()
         else:
@@ -1843,7 +1874,7 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
             ("🤖 IA + Previsão","Previsão M+1/M+2/M+3 e análise OOS",[
                 "A tabela de Horizonte 3 Meses usa os pesos automáticos calibrados pelo OOS.",
                 "No painel OOS, um badge de segmentação exibe o filtro de classe usado na última execução.",
-                "Rode o Pipeline Completo após o OOS para que a Prev. Combinada reflita os pesos calibrados.",
+                "O OOS aplica automaticamente os pesos calibrados a todas as tabelas — não é mais necessário rodar o pipeline novamente.",
             ]),
             ("📋 Top 10 Piores WMAPE","Priorização nos SKUs críticos",[
                 "Dois painéis: 12 meses (problemas estruturais) e 6 meses (problemas recentes).",
@@ -1870,7 +1901,7 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
             st.success("**Boas práticas recomendadas:**\n\n"
                 "- Mantenha Situação atualizada na Base_Dados mensalmente\n"
                 "- Use o filtro de classe para segmentar o OOS por categoria estratégica\n"
-                "- Rode o OOS → Pipeline novamente para aplicar os pesos calibrados\n"
+                "- Após o OOS, todas as tabelas refletem os pesos calibrados automaticamente\n"
                 "- Verifique o badge na sidebar: '🎯 Peso automático ativo: N SKUs'\n"
                 "- Compare os painéis de 6 e 12 meses no Top 10 para classificar problemas\n"
                 "- Combine a previsão do SONAR com o conhecimento de mercado da equipe")
