@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-import os, glob, warnings, io, datetime, unicodedata
+import os, glob, warnings, io, datetime, unicodedata, json, re
+import urllib.request, urllib.error
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -210,6 +211,266 @@ METODOS_DESC = {
     'Croston': 'Ideal para demanda intermitente com muitos zeros.',
     'TriM-Heres': 'Média do mesmo trimestre dos 2 últimos anos. Captura sazonalidade.',
 }
+
+# ══════════════════════════════════════════════════════════════
+# IMEDIATO — BASE DE CONHECIMENTO E API
+# ══════════════════════════════════════════════════════════════
+
+SONAR_KNOWLEDGE = """
+Você é o Imediato, o copiloto do SONAR, um assistente especialista em planejamento de demanda
+integrado à ferramenta SONAR (Supply & Operations Near-real-time Analytics & Recommendation).
+Seu papel é ajudar o planejador a interpretar os dados, entender as regras da ferramenta
+e sugerir ações. Responda SEMPRE em português do Brasil, de forma objetiva e prática.
+Quando o planejador perguntar sobre um SKU específico, use os DADOS fornecidos no contexto.
+Se um dado não estiver disponível, diga isso claramente em vez de inventar.
+
+═══ REGRAS E CONCEITOS DO SONAR ═══
+
+WMAPE (indicador principal): WMAPE = Σ|Real − Previsto| ÷ Σ|Real|. Ponderado pela demanda real.
+Faixas de qualidade: <20% Excelente | 20–35% Bom (meta do SONAR) | 35–60% Regular | >60% Crítico.
+Sempre prefira a MEDIANA do WMAPE à média — SKUs de baixa demanda geram WMAPE de centenas de %
+e distorcem a média.
+
+WALK-FORWARD VALIDATION (backtesting): para cada SKU, o SONAR simula como cada método teria
+se saído nos últimos N períodos, treinando só com dados anteriores (sem data leakage). É assim
+que o "melhor método" de cada SKU é escolhido — o que minimiza o WMAPE no walk-forward.
+
+OS 9 MÉTODOS ESTATÍSTICOS:
+- Naive: usa o último valor. Baseline.
+- MA-3 / MA-6: média móvel simples de 3 ou 6 períodos.
+- WMA-3: média ponderada, mais peso no recente.
+- SES: suavização exponencial simples (alfa otimizado).
+- Holt: captura tendência linear.
+- Holt-Winters: tendência + sazonalidade anual (exige ≥24 períodos).
+- Croston: para demanda intermitente (muitos zeros).
+- TriM-Heres: média do mesmo trimestre dos 2 últimos anos; captura sazonalidade sem exigir
+  série longa. Recomendado quando ACF lag-12 > 0,4.
+
+CLASSIFICAÇÃO DA DEMANDA (por CV = desvio/média e % de zeros):
+- Estável (CV<0,25): previsível → MA-6 ou SES.
+- Variável (CV 0,25–0,60) → SES ou Holt.
+- Errática (CV>0,60): volátil → revisar dados, SES alpha alto.
+- Intermitente (>50% zeros) → Croston.
+- Esporádica (>25% zeros + alta variação).
+
+MOTOR DE IA (Gradient Boosting por SKU): treinado individualmente com features de lag (últimos
+6 valores, médias móveis 3 e 6, desvio padrão, mín/máx). Usa DETRENDING: treina sobre os resíduos
+de uma tendência linear e re-adiciona a tendência na previsão, o que permite extrapolar tendências
+de crescimento/queda. Séries com menos de 14 períodos NÃO têm IA. O WMAPE in-sample da IA é
+otimista; use o OOS para avaliação honesta.
+
+PREVISÃO COMBINADA: prev_comb = peso_IA × Prev_IA + (1 − peso_IA) × Prev_Estatística.
+O peso vem do slider global OU do peso automático calibrado pelo OOS.
+
+IA OUT-OF-SAMPLE (OOS): re-treina a IA excluindo os períodos de teste, gerando WMAPE honesto.
+Compara IA vs melhor método estatístico e define o peso automático por SKU:
+- IA vence (ratio<0,90) → peso IA = 70%
+- desempenho similar (0,90–1,10) → peso IA = 50%
+- estatístico vence (>1,10) → peso IA = 0% (100% estatístico)
+Após rodar o OOS, todas as tabelas (inclusive Horizonte 3 Meses e Prev. Combinada) são
+atualizadas automaticamente com os pesos calibrados. O OOS pode ser segmentado por classe
+de material (filtro na sidebar).
+
+SANEAMENTO POR SITUAÇÃO: a aba Base_Dados tem a coluna Situação. Apenas SKUs com situação
+"1- NORMAL" são processados; os demais (inativos, cancelados etc.) são descartados antes de
+qualquer cálculo. Há uma trava: se nenhum SKU casar com "1- NORMAL", o saneamento é ignorado
+para não esvaziar a base.
+
+FILTRO POR CLASSE: a Base_Dados tem Classe de Material e Descrição da Classe. Na sidebar, o
+planejador pode segmentar quais classes entram no OOS, com campo de pesquisa.
+
+HORIZONTE 3 MESES: previsão M+1/M+2/M+3 a partir do mês vigente, usando o modelo combinado.
+Avança automaticamente no virar do mês.
+
+TOP 10 PIORES WMAPE: dois painéis — 12 meses (problemas estruturais) e 6 meses (problemas
+recentes). SKU nos dois = estrutural; só no de 6 = evento pontual. SKUs com <3 registros na
+janela são excluídos.
+
+═══ COMO ORIENTAR O PLANEJADOR ═══
+- WMAPE crítico (>60%): revisar histórico, checar outliers, verificar quebra estrutural
+  (novo cliente, novo projeto), considerar estoque de segurança em vez de depender da previsão.
+- Mudança de classificação entre meses: sinal de mudança de comportamento — investigar.
+- Para itens estratégicos (alto giro/valor), priorizar revisão manual mesmo com WMAPE bom.
+- A ferramenta APOIA o julgamento do planejador; não o substitui.
+"""
+
+def _norm_sku(v):
+    """Normaliza um SKU para comparação por string ('12345.0' -> '12345')."""
+    s = str(v).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+_MESES_ORD_CTX = {"jan":1,"fev":2,"mar":3,"abr":4,"mai":5,"jun":6,
+                  "jul":7,"ago":8,"set":9,"out":10,"nov":11,"dez":12}
+
+def _detectar_skus_na_pergunta(pergunta, skus_validos, limite=3):
+    """Encontra códigos de SKU citados no texto da pergunta.
+    skus_validos: conjunto de SKUs normalizados (strings)."""
+    if not pergunta:
+        return []
+    candidatos = re.findall(r"\d{3,}", str(pergunta))
+    achados = []
+    for c in candidatos:
+        if c in skus_validos and c not in achados:
+            achados.append(c)
+        if len(achados) >= limite:
+            break
+    return achados
+
+def _montar_contexto_dados(df_ia, df_bt, df_oos, skus_foco=None,
+                           df_base=None, col_sku=None, col_periodo=None,
+                           col_ano=None, col_demanda=None):
+    """Monta um resumo compacto dos dados para enviar ao modelo.
+    skus_foco: lista de SKUs (strings normalizadas) a detalhar; vazio = só panorama."""
+    linhas = []
+    if df_ia is None or len(df_ia) == 0:
+        return "Nenhum dado disponível ainda — o planejador precisa rodar o Pipeline Completo."
+
+    # Panorama geral
+    n_total = len(df_ia)
+    linhas.append(f"PANORAMA GERAL: {n_total} SKUs processados.")
+    if 'classificacao' in df_ia.columns:
+        dist = df_ia['classificacao'].value_counts().to_dict()
+        linhas.append("Distribuição por classificação: " + ", ".join(f"{k}={v}" for k, v in dist.items()))
+    if 'melhor_metodo' in df_ia.columns:
+        met = df_ia['melhor_metodo'].value_counts().to_dict()
+        linhas.append("Melhor método (contagem): " + ", ".join(f"{k}={v}" for k, v in met.items()))
+    if 'wmape_melhor' in df_ia.columns:
+        wm = df_ia['wmape_melhor'].dropna()
+        if len(wm) > 0:
+            linhas.append(f"WMAPE mediano: {wm.median()*100:.1f}% | média: {wm.mean()*100:.1f}% | "
+                          f"SKUs <35%: {(wm<0.35).sum()} | SKUs >60%: {(wm>0.60).sum()}")
+
+    # Top 10 piores (sempre útil de ter em mãos)
+    if 'wmape_melhor' in df_ia.columns:
+        piores = df_ia.dropna(subset=['wmape_melhor']).nlargest(10, 'wmape_melhor')
+        if len(piores) > 0:
+            linhas.append("\nTOP 10 PIORES WMAPE:")
+            for _, r in piores.iterrows():
+                linhas.append(f"  SKU {r['sku']}: WMAPE={r['wmape_melhor']*100:.0f}%, "
+                              f"classe={r.get('classificacao','?')}, método={r.get('melhor_metodo','?')}")
+
+    # OOS resumido
+    if df_oos is not None and len(df_oos) > 0:
+        val = df_oos.dropna(subset=['wmape_ia_oos', 'wmape_stat_oos']) if 'wmape_ia_oos' in df_oos.columns else df_oos
+        if len(val) > 0:
+            n_ia = int((val['wmape_ia_oos'] < val['wmape_stat_oos']).sum())
+            linhas.append(f"\nOOS: {len(val)} SKUs avaliados. IA vence em {n_ia}, estatístico em {len(val)-n_ia}.")
+
+    # Detalhe dos SKUs em foco (selecionado e/ou citados na pergunta)
+    for sku_foco in (skus_foco or []):
+        sk = _norm_sku(sku_foco)
+        try:
+            _ids_norm = df_ia['sku'].apply(_norm_sku)
+            row = df_ia[_ids_norm == sk]
+            if len(row) > 0:
+                r = row.iloc[0]
+                linhas.append(f"\n═══ DETALHE DO SKU {sk} ═══")
+                for col in ['classificacao','tendencia','sazonalidade','n_periodos','media_historica',
+                            'cv','previsao_estatistica','previsao_ia','previsao_combinada',
+                            'melhor_metodo','wmape_melhor','wmape_ia_insample','peso_ia_usado']:
+                    if col in r.index:
+                        val_c = r[col]
+                        if isinstance(val_c, float) and 'wmape' in col and pd.notna(val_c):
+                            val_c = f"{val_c*100:.1f}%"
+                        linhas.append(f"  {col}: {val_c}")
+                if df_bt is not None:
+                    rb = df_bt[df_bt['sku'].apply(_norm_sku) == sk]
+                    if len(rb) > 0:
+                        wcols = {c.replace('wmape_',''): rb.iloc[0][c] for c in rb.columns if c.startswith('wmape_') and pd.notna(rb.iloc[0][c])}
+                        if wcols:
+                            linhas.append("  WMAPE por método (backtesting): " +
+                                          ", ".join(f"{k}={v*100:.0f}%" for k, v in wcols.items()))
+                # ── Histórico de demanda (últimos 24 períodos) ──
+                if df_base is not None and col_sku and col_demanda:
+                    _b = df_base[df_base[col_sku].apply(_norm_sku) == sk].copy()
+                    if len(_b) > 0:
+                        if col_ano and col_periodo:
+                            _b["__an_ctx"] = pd.to_numeric(_b[col_ano], errors="coerce").fillna(0).astype(int)
+                            _b["__mn_ctx"] = (_b[col_periodo].astype(str).str.lower().str[:3]
+                                              .map(_MESES_ORD_CTX).fillna(0).astype(int))
+                            _b = _b.sort_values(["__an_ctx", "__mn_ctx"])
+                            _rotulos = (_b[col_periodo].astype(str).str[:3] + "/" +
+                                        _b[col_ano].astype(str)).tolist()
+                        else:
+                            _rotulos = [str(i) for i in range(len(_b))]
+                        _vals = pd.to_numeric(_b[col_demanda], errors="coerce").fillna(0).tolist()
+                        _rotulos, _vals = _rotulos[-24:], _vals[-24:]
+                        linhas.append(f"  Histórico de demanda ({len(_vals)} últimos períodos, do mais antigo ao mais recente):")
+                        linhas.append("  " + ", ".join(f"{rt}={v:.0f}" for rt, v in zip(_rotulos, _vals)))
+            else:
+                linhas.append(f"\nSKU {sk} não encontrado nos dados processados.")
+        except Exception:
+            linhas.append(f"\nNão consegui localizar o SKU {sk}.")
+
+    return "\n".join(linhas)
+
+def chamar_claude_stream(api_key, mensagens, contexto_dados, modelo="claude-sonnet-4-6"):
+    """Chama a API da Anthropic em STREAMING via urllib (sem dependência externa).
+    É um gerador: vai entregando o texto em pedaços, para uso com st.write_stream.
+    mensagens: lista [{'role':'user'/'assistant','content':str}]."""
+    system = SONAR_KNOWLEDGE + "\n\n═══ DADOS ATUAIS DO SONAR ═══\n" + contexto_dados
+    payload = {
+        "model": modelo,
+        "max_tokens": 2500,
+        "system": system,
+        "messages": mensagens,
+        "stream": True,
+    }
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "accept": "text/event-stream",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            truncada = False
+            for raw in resp:
+                line = raw.decode("utf-8", errors="ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str:
+                    continue
+                try:
+                    ev = json.loads(data_str)
+                except Exception:
+                    continue
+                t = ev.get("type")
+                if t == "content_block_delta":
+                    delta = ev.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        yield delta.get("text", "")
+                elif t == "message_delta":
+                    if ev.get("delta", {}).get("stop_reason") == "max_tokens":
+                        truncada = True
+                elif t == "error":
+                    yield ("\n\n❌ Erro da API: "
+                           + str(ev.get("error", {}).get("message", "desconhecido")))
+                    return
+            if truncada:
+                yield ("\n\n⚠️ *A resposta foi cortada pelo limite de tamanho — "
+                       "peça \"continue\" para ver o restante.*")
+    except urllib.error.HTTPError as e:
+        corpo = e.read().decode("utf-8", errors="ignore")
+        if e.code == 401:
+            yield "❌ Chave de API inválida ou não autorizada. Verifique a chave inserida."
+        elif e.code == 429:
+            yield "⏳ Limite de uso da API atingido (rate limit). Aguarde um momento e tente novamente."
+        else:
+            yield f"❌ Erro da API (HTTP {e.code}): {corpo[:300]}"
+    except urllib.error.URLError as e:
+        yield f"❌ Falha de conexão com a API: {e.reason}"
+    except Exception as e:
+        yield f"❌ Erro inesperado: {type(e).__name__}: {e}"
+
 
 # ══════════════════════════════════════════════════════════════
 # BACKTESTING
@@ -1162,9 +1423,10 @@ def main():
     # ═══════════════════════════════════════════════════════════
     # TABS
     # ═══════════════════════════════════════════════════════════
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📊 Simulação Retrospectiva", "🎯 Seletor de Método", "🔍 Análise por SKU",
         "🤖 IA + Previsão", "📋 Top 10 Piores WMAPE", "📖 Guia do Usuário",
+        "🧭 Imediato",
     ])
 
     # ─────────────────────────────────────────────────────────
@@ -1905,6 +2167,130 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
                 "- Verifique o badge na sidebar: '🎯 Peso automático ativo: N SKUs'\n"
                 "- Compare os painéis de 6 e 12 meses no Top 10 para classificar problemas\n"
                 "- Combine a previsão do SONAR com o conhecimento de mercado da equipe")
+
+    # ─────────────────────────────────────────────────────────
+    # TAB 7: IMEDIATO
+    # ─────────────────────────────────────────────────────────
+    with tab7:
+        st.subheader("🧭 Imediato — Copiloto do Planejador")
+        st.caption("Tire dúvidas sobre SKUs e sobre as regras do SONAR. O assistente conhece "
+                   "a metodologia da ferramenta e enxerga os dados já processados.")
+
+        # ── Configuração da chave de API ─────────────────────
+        with st.expander("⚙️ Configuração da chave de API", expanded=False):
+            st.markdown(
+                "A chave **não fica salva no código** — vale apenas para esta sessão do navegador. "
+                "Para uso fixo, configure em *Settings → Secrets* do Streamlit como `ANTHROPIC_API_KEY`."
+            )
+            _key_secret = None
+            try:
+                _key_secret = st.secrets.get("ANTHROPIC_API_KEY", None)
+            except Exception:
+                _key_secret = None
+            _key_input = st.text_input(
+                "Chave de API da Anthropic", type="password",
+                value="", placeholder="sk-ant-...",
+                help="Começa com sk-ant-. Use a sua chave existente."
+            )
+            api_key = _key_input.strip() or _key_secret
+            if _key_secret and not _key_input.strip():
+                st.caption("🔑 Usando a chave configurada nos Secrets.")
+            _modelo_cop = st.selectbox(
+                "Modelo",
+                options=["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
+                index=0,
+                help="Sonnet 4.6: melhor custo-benefício (recomendado). "
+                     "Opus 4.8: máxima capacidade. Haiku 4.5: mais rápido e barato."
+            )
+
+        if 'imediato_msgs' not in st.session_state:
+            st.session_state['imediato_msgs'] = []
+
+        _df_ia_cop  = st.session_state.get('df_ia')
+        _df_bt_cop  = st.session_state.get('df_backtest')
+        _df_oos_cop = st.session_state.get('df_oos')
+
+        if _df_ia_cop is None or len(_df_ia_cop) == 0:
+            st.info("👆 Rode o **Pipeline Completo** primeiro — o Imediato precisa dos dados "
+                    "processados para responder sobre os SKUs.")
+        else:
+            # ── Foco opcional em um SKU ───────────────────────
+            col_cf1, col_cf2 = st.columns([1, 3])
+            _skus_disp = ["(panorama geral)"] + [str(s) for s in sorted(_df_ia_cop['sku'].dropna().unique())]
+            _sku_foco_sel = col_cf1.selectbox("SKU em foco", options=_skus_disp, key='imediato_sku_foco')
+            _sku_foco = None if _sku_foco_sel == "(panorama geral)" else _sku_foco_sel
+
+            col_cf2.markdown("**Perguntas rápidas:**")
+            _qr = col_cf2.columns(3)
+            _pergunta_rapida = None
+            if _qr[0].button("Por que esse WMAPE?", use_container_width=True, disabled=(_sku_foco is None)):
+                _pergunta_rapida = f"Explique por que o SKU {_sku_foco} tem esse WMAPE e o que fazer para melhorar."
+            if _qr[1].button("Que ação tomar?", use_container_width=True):
+                _pergunta_rapida = (f"Quais ações você recomenda para o SKU {_sku_foco}?"
+                                    if _sku_foco else "Quais os SKUs mais críticos e que ações recomenda?")
+            if _qr[2].button("IA ou estatístico?", use_container_width=True, disabled=(_sku_foco is None)):
+                _pergunta_rapida = f"Para o SKU {_sku_foco}, devo confiar mais na IA ou no método estatístico? Por quê?"
+
+            # ── Resumo executivo da rodada (briefing automático) ──
+            if st.button("📋 Gerar resumo executivo da rodada", use_container_width=True,
+                         help="Parecer pronto para compartilhar: qualidade geral, riscos, "
+                              "IA vs. estatístico e ações prioritárias do mês."):
+                _pergunta_rapida = (
+                    "Gere um RESUMO EXECUTIVO desta rodada do SONAR, em formato pronto para "
+                    "compartilhar com a liderança, cobrindo: "
+                    "1) Qualidade geral das previsões (WMAPE mediano e leitura das faixas); "
+                    "2) Principais riscos — os SKUs mais críticos e o provável motivo de cada um; "
+                    "3) Balanço IA vs. estatístico com base no OOS; "
+                    "4) De 3 a 5 ações prioritárias para o planejador neste mês. "
+                    "Seja direto, use apenas os dados do contexto e destaque números-chave."
+                )
+
+            # ── Histórico do chat ─────────────────────────────
+            for _m in st.session_state['imediato_msgs']:
+                with st.chat_message(_m['role']):
+                    st.markdown(_m['content'])
+
+            _entrada = st.chat_input("Pergunte sobre um SKU ou sobre as regras do SONAR...")
+            _pergunta = _entrada or _pergunta_rapida
+
+            if _pergunta:
+                if not api_key:
+                    st.warning("⚠️ Insira a chave de API em **Configuração da chave de API** acima para conversar.")
+                else:
+                    st.session_state['imediato_msgs'].append({'role': 'user', 'content': _pergunta})
+                    with st.chat_message("user"):
+                        st.markdown(_pergunta)
+
+                    # SKUs em foco: o selecionado no seletor + os citados na pergunta
+                    _skus_validos = set(_df_ia_cop['sku'].apply(_norm_sku))
+                    _skus_foco = []
+                    if _sku_foco:
+                        _skus_foco.append(_norm_sku(_sku_foco))
+                    for _sk_det in _detectar_skus_na_pergunta(_pergunta, _skus_validos):
+                        if _sk_det not in _skus_foco:
+                            _skus_foco.append(_sk_det)
+
+                    with st.chat_message("assistant"):
+                        _ctx = _montar_contexto_dados(
+                            _df_ia_cop, _df_bt_cop, _df_oos_cop, skus_foco=_skus_foco,
+                            df_base=df_base, col_sku=col_sku, col_periodo=col_periodo,
+                            col_ano=col_ano, col_demanda=col_demanda,
+                        )
+                        # envia só as últimas 8 mensagens, garantindo que comece em 'user'
+                        _hist = st.session_state['imediato_msgs'][-8:]
+                        while _hist and _hist[0]['role'] != 'user':
+                            _hist = _hist[1:]
+                        _resp = st.write_stream(
+                            chamar_claude_stream(api_key, _hist, _ctx, modelo=_modelo_cop)
+                        )
+                    if not isinstance(_resp, str):
+                        _resp = "".join(_resp)
+                    st.session_state['imediato_msgs'].append({'role': 'assistant', 'content': _resp})
+
+            if st.session_state['imediato_msgs']:
+                if st.button("🗑️ Limpar conversa"):
+                    st.session_state['imediato_msgs'] = []
+                    st.rerun()
 
 if __name__ == "__main__":
     main()
