@@ -286,24 +286,6 @@ TOP 10 PIORES WMAPE: dois painéis — 12 meses (problemas estruturais) e 6 mese
 recentes). SKU nos dois = estrutural; só no de 6 = evento pontual. SKUs com <3 registros na
 janela são excluídos.
 
-═══ CONTROLES DA BARRA LATERAL (SIDEBAR) ═══
-O planejador ajusta a ferramenta por três controles deslizantes na barra lateral. Quando ele
-falar em "ajustar/colocar/deixar em X", costuma se referir a um destes:
-- "Períodos de backtesting (walk-forward)" — varia de 2 a 6 (padrão 3). Define quantos períodos
-  finais o SONAR usa para simular e comparar os métodos no walk-forward. "Backtesting ajustado/
-  deixado em 6" significa que a validação usa os 6 últimos períodos: o teste fica mais robusto
-  (mais pontos avaliados), mas exige histórico maior e deixa menos dados para treino. Valores
-  menores (2–3) testam só o passado bem recente.
-- "Peso da IA na previsão combinada (%)" — de 0 a 100 (padrão 50). É o peso GLOBAL da IA aplicado
-  a quem ainda não tem peso automático do OOS. Depois de rodar o OOS, os SKUs calibrados usam o
-  peso automático (0/50/70%) e ignoram este slider.
-- "Períodos de teste out-of-sample" — de 1 a 3 (padrão 2). Quantos períodos finais são separados
-  e escondidos da IA no OOS para medir o WMAPE honesto. Mais períodos = avaliação mais confiável,
-  porém encurta a série de treino.
-Também há na sidebar o botão "Rodar Pipeline Completo" (recalcula tudo), "Limpar Cache", a
-"Segmentação por Classe" (escolhe quais classes de material entram no OOS) e o botão
-"IA Out-of-Sample" que dispara a calibração.
-
 ═══ COMO ORIENTAR O PLANEJADOR ═══
 - WMAPE crítico (>60%): revisar histórico, checar outliers, verificar quebra estrutural
   (novo cliente, novo projeto), considerar estoque de segurança em vez de depender da previsão.
@@ -750,10 +732,10 @@ def _escrever_aba_estilizada(writer, df, nome_aba, col_wmape=None, col_wmape_esc
                   border=1, border_color='CCCCCC', align='center', valign='vcenter', font_size=10, font_name='Calibri')
     row_par   = _xl_fmt(wb, bg_color=_XL['white'],     border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', valign='vcenter')
     row_impar = _xl_fmt(wb, bg_color=_XL['off_white'], border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', valign='vcenter')
-    fmt_excelente = _xl_fmt(wb, bg_color=_XL['light_green'],  border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='1B5E20')
-    fmt_bom       = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='004D40')
-    fmt_regular   = _xl_fmt(wb, bg_color=_XL['light_yellow'], border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='E65100')
-    fmt_critico   = _xl_fmt(wb, bg_color=_XL['light_red'],    border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='B71C1C')
+    fmt_excelente = _xl_fmt(wb, bg_color=_XL['light_green'],  border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='1B5E20', num_format='0.0%')
+    fmt_bom       = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='004D40', num_format='0.0%')
+    fmt_regular   = _xl_fmt(wb, bg_color=_XL['light_yellow'], border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='E65100', num_format='0.0%')
+    fmt_critico   = _xl_fmt(wb, bg_color=_XL['light_red'],    border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color='B71C1C', num_format='0.0%')
     fmt_metodo    = _xl_fmt(wb, bg_color=_XL['light_teal'],   border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', bold=True, font_color=_XL['teal'])
     fmt_num       = _xl_fmt(wb, bg_color=_XL['white'],        border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
     fmt_num_impar = _xl_fmt(wb, bg_color=_XL['off_white'],    border=1, border_color='E2E8F0', font_size=9, font_name='Calibri', num_format='#,##0.00', valign='vcenter')
@@ -764,7 +746,13 @@ def _escrever_aba_estilizada(writer, df, nome_aba, col_wmape=None, col_wmape_esc
 
     cols = list(df.columns)
     n_cols = len(cols)
-    wmape_idx  = cols.index(col_wmape)  if col_wmape  and col_wmape  in cols else None
+    if col_wmape is None:
+        _wmape_cols = []
+    elif isinstance(col_wmape, (list, tuple, set)):
+        _wmape_cols = list(col_wmape)
+    else:
+        _wmape_cols = [col_wmape]
+    wmape_idx_set = {cols.index(c) for c in _wmape_cols if c in cols}
     metodo_idx = cols.index(col_metodo) if col_metodo and col_metodo in cols else None
     sku_idx_list = [i for i, c in enumerate(cols) if c.upper() in ('SKU','COD. MATERIAL','CODIGO','MATERIAL','ITEM') or 'sku' in c.lower()]
 
@@ -781,7 +769,7 @@ def _escrever_aba_estilizada(writer, df, nome_aba, col_wmape=None, col_wmape_esc
         bg_par = ri % 2 == 0
         for ci, val in enumerate(row):
             col_name = cols[ci]
-            is_wmape_col  = (ci == wmape_idx)
+            is_wmape_col  = (ci in wmape_idx_set)
             is_metodo_col = (ci == metodo_idx)
             is_num = isinstance(val, (int, float)) and not pd.isna(val)
 
@@ -791,10 +779,13 @@ def _escrever_aba_estilizada(writer, df, nome_aba, col_wmape=None, col_wmape_esc
                 ws.write_string(ri+2, ci, str(int(val)) if isinstance(val, float) and val == int(val) else str(val) if val is not None else '—', fmt_sku)
             elif is_wmape_col:
                 raw = val
-                if isinstance(raw, str) and raw.endswith('%'):
-                    try: raw = float(raw.replace('%','').replace(',','.').strip()) / 100
-                    except: raw = np.nan
-                if pd.isna(raw):
+                if isinstance(raw, str):
+                    _s = raw.replace('%', '').replace(',', '.').strip()
+                    try:
+                        raw = (float(_s) / 100) if raw.strip().endswith('%') else float(_s)
+                    except Exception:
+                        raw = np.nan
+                if not isinstance(raw, (int, float)) or pd.isna(raw):
                     ws.write(ri+2, ci, '—', row_par if bg_par else row_impar)
                 else:
                     v_pct = raw * col_wmape_escala if col_wmape_escala != 1.0 else raw
@@ -802,7 +793,7 @@ def _escrever_aba_estilizada(writer, df, nome_aba, col_wmape=None, col_wmape_esc
                     elif v_pct < 0.35: fmt_w = fmt_bom
                     elif v_pct < 0.60: fmt_w = fmt_regular
                     else:              fmt_w = fmt_critico
-                    ws.write(ri+2, ci, f'{v_pct*100:.1f}%', fmt_w)
+                    ws.write_number(ri+2, ci, float(v_pct), fmt_w)
             elif is_metodo_col:
                 ws.write(ri+2, ci, str(val) if val is not None else '—', fmt_metodo)
             elif is_num and ('wmape' in col_name.lower() or 'erro' in col_name.lower() or '%' in col_name):
@@ -1930,7 +1921,7 @@ Ajuste o peso no slider da barra lateral. Após rodar o **🔬 IA Out-of-Sample*
                 fig_oos.update_layout(legend=dict(title='',orientation='h',yanchor='bottom',y=-0.25,xanchor='center',x=0.5), margin=dict(l=60,r=20,t=50,b=80))
                 st.plotly_chart(fig_oos, use_container_width=True, key="scatter_oos")
 
-            buf_oos = exportar_excel_visual({'IA_OutofSample': {'df': df_oos_display.reset_index(drop=True), 'col_wmape':'WMAPE IA (OOS)','col_metodo':'Melhor Método','col_widths':{'SKU':14,'Melhor Método':18,'WMAPE BT':14,'WMAPE IA (OOS)':18,'WMAPE Estat. (OOS)':20,'Recomendação':35}}})
+            buf_oos = exportar_excel_visual({'IA_OutofSample': {'df': df_oos_display.reset_index(drop=True), 'col_wmape':['WMAPE BT','WMAPE IA (OOS)','WMAPE Estat. (OOS)'],'col_metodo':'Melhor Método','col_widths':{'SKU':14,'Melhor Método':18,'WMAPE BT':14,'WMAPE IA (OOS)':18,'WMAPE Estat. (OOS)':20,'Recomendação':52,'status':10,'peso_ia_automatico':18,'Peso IA Automático':18,'_segmentacao':22}}})
             st.download_button("📥 Exportar IA Out-of-Sample (.xlsx)", data=buf_oos, file_name=f"ia_oos_{datetime.date.today().strftime('%d_%m_%Y')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         # ── HORIZONTE 3 MESES ────────────────────────────────
@@ -2213,29 +2204,6 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
             api_key = _key_input.strip() or _key_secret
             if _key_secret and not _key_input.strip():
                 st.caption("🔑 Usando a chave configurada nos Secrets.")
-            # ── Validação e saneamento da chave ───────────────
-            if api_key:
-                # Remove caracteres invisíveis/não imprimíveis que vêm junto
-                # ao copiar de e-mails, PDFs ou gerenciadores de senha
-                _key_limpa = re.sub(r'[^\x21-\x7E]', '', str(api_key))
-                if _key_limpa != api_key:
-                    st.caption("🧹 Removi caracteres invisíveis da chave colada.")
-                api_key = _key_limpa
-                if "..." in api_key:
-                    st.error("🚫 Essa chave parece ser a versão **truncada** exibida no console "
-                             "da Anthropic (os `...` não fazem parte da chave real). O console "
-                             "mostra a chave completa **apenas no momento da criação**. Cole a "
-                             "chave completa salva por você, ou crie uma nova chave e copie-a "
-                             "na hora.")
-                    api_key = None
-                elif not api_key.startswith("sk-ant-"):
-                    st.warning("⚠️ A chave deveria começar com `sk-ant-`. Verifique se copiou "
-                               "a partir do início.")
-                elif len(api_key) < 40:
-                    st.warning("⚠️ A chave parece curta demais — chaves da Anthropic têm mais de "
-                               "100 caracteres. Verifique se copiou a chave completa.")
-                else:
-                    st.caption(f"✔️ Formato da chave OK ({len(api_key)} caracteres).")
             _modelo_cop = st.selectbox(
                 "Modelo",
                 options=["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
@@ -2273,7 +2241,7 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
                 _pergunta_rapida = f"Para o SKU {_sku_foco}, devo confiar mais na IA ou no método estatístico? Por quê?"
 
             # ── Resumo executivo da rodada (briefing automático) ──
-            if st.button("📋 Gerar Briefing da Rodada", use_container_width=True,
+            if st.button("📋 Gerar resumo executivo da rodada", use_container_width=True,
                          help="Parecer pronto para compartilhar: qualidade geral, riscos, "
                               "IA vs. estatístico e ações prioritárias do mês."):
                 _pergunta_rapida = (
@@ -2317,15 +2285,6 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
                             df_base=df_base, col_sku=col_sku, col_periodo=col_periodo,
                             col_ano=col_ano, col_demanda=col_demanda,
                         )
-                        # Estado atual dos controles da barra lateral (o que está
-                        # selecionado AGORA), para o Imediato responder sobre os ajustes
-                        _ctx_controles = (
-                            "═══ AJUSTES ATUAIS NA BARRA LATERAL ═══\n"
-                            f"Períodos de backtesting (walk-forward): {n_test}\n"
-                            f"Peso global da IA na previsão combinada: {peso_ia}%\n"
-                            f"Períodos de teste out-of-sample: {n_test_oos}\n"
-                        )
-                        _ctx = _ctx_controles + "\n" + _ctx
                         # envia só as últimas 8 mensagens, garantindo que comece em 'user'
                         _hist = st.session_state['imediato_msgs'][-8:]
                         while _hist and _hist[0]['role'] != 'user':
@@ -2335,12 +2294,7 @@ A segmentação usada fica registrada no painel OOS da Tab IA + Previsão.
                         )
                     if not isinstance(_resp, str):
                         _resp = "".join(_resp)
-                    # Erros de API não entram no histórico — evita que a mensagem
-                    # de erro "fique presa" reaparecendo a cada interação
-                    if _resp.startswith(("❌", "⏳")):
-                        st.session_state['imediato_msgs'].pop()  # remove a pergunta órfã
-                    else:
-                        st.session_state['imediato_msgs'].append({'role': 'assistant', 'content': _resp})
+                    st.session_state['imediato_msgs'].append({'role': 'assistant', 'content': _resp})
 
             if st.session_state['imediato_msgs']:
                 if st.button("🗑️ Limpar conversa"):
